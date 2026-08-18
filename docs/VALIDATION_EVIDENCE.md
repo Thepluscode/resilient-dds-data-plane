@@ -1,197 +1,206 @@
 # Validation Evidence
 
-Last regenerated: 2026-08-18, by running the commands shown. Every number below
-was produced by the tooling on this page; none is estimated.
+Last updated: 2026-08-18. Claims below are tied to executed tooling, not design intent.
 
-## Environment
+## Evidence generations
 
-| | |
+This repository now has two useful evidence generations:
+
+1. **Original Milestones 1/2 local evidence** — Fast DDS 2.11.2 from Ubuntu packaging, including the first live RTPS, late-joiner, hard-death, latency and `tc netem` findings.
+2. **Current regression/security evidence** — Fast DDS **2.14.6**, built from source with `SECURITY=ON`, executed in GitHub Actions on commit `c2b0c2e126e298ad2d492aef3e576ff174827072`.
+
+The current security/regression artifact is the source of truth for Milestone 3.
+
+## Current CI anchor
+
+| Item | Value |
 |---|---|
-| Container | `ubuntu:24.04` (`docker/Dockerfile`) |
-| Compiler | g++ 13.3.0, C++17 |
-| CMake | 3.28.3 |
-| DDS | Fast DDS (`libfastrtps-dev`) **2.11.2+ds-6.1build3** |
-| IDL codegen | Fast DDS-Gen **2.3.0** |
-| Host | Apple Silicon macOS running Docker Desktop |
+| Branch commit | `c2b0c2e126e298ad2d492aef3e576ff174827072` |
+| GitHub Actions run | `32178914685` |
+| Evidence artifact digest | `sha256:c9143f22bce757a82aa9ffd19aa17c9a548b9b9aee5f269fff0be459be574773` |
+| Runner | GitHub Actions `ubuntu-24.04` |
+| Scenario container | `ubuntu:22.04` |
+| Compiler in scenario image | GCC 11.4.0, C++17 |
+| DDS | Fast DDS **2.14.6**, source build, `SECURITY=ON` |
+| IDL codegen | Fast DDS-Gen **3.3.2** |
 
-The macOS host toolchain is **not** used. Its Command Line Tools install is
-missing libc++ headers (`/Library/Developer/CommandLineTools/usr/include/c++/v1`
-contains 3 files), so `#include <cstdint>` fails for any program. Everything is
-built and run in the container. That is also the correct environment for DDS:
-process kills and network namespaces are the failure modes under test.
-
-## Compiler gate
+The scenario Dockerfile uses repository-root context:
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+docker build -t rdtf-build -f docker/Dockerfile .
 ```
 
-Core library built with `-Wall -Wextra -Wpedantic -Werror`. Result: **PASS**.
+## Core compiler/test gates
 
-## Unit test gate
+Core CI on the current branch: **PASS**.
 
-```bash
-ctest --test-dir build --output-on-failure
-```
+The core uses strict warnings and the unit suite validates sequence/freshness/schema logic, QoS-profile validation and health-state transitions.
 
-Result: **PASS** — `100% tests passed, 0 tests failed out of 1`.
+Sanitizer CI on the current branch: **PASS** using AddressSanitizer + UndefinedBehaviorSanitizer for the core/unit-test path.
 
-The core suite covers the detector and health state machine only. It does not
-touch DDS; the DDS behaviour is covered by the scenario harness below.
+Scope limit: live DDS transport threads are not yet covered by the sanitizer gate.
 
-## Sanitizer gate
+## Milestone 1 — live DDS failure scenarios
 
-```bash
-cmake -S . -B san -DCMAKE_BUILD_TYPE=Debug -DRDTF_ENABLE_SANITIZERS=ON
-cmake --build san -j && ctest --test-dir san --output-on-failure
-```
+The current Fast DDS 2.14.6 workflow reruns the real-process RTPS failure suite before security validation. It passed on the Milestone 3 commit.
 
-AddressSanitizer + UndefinedBehaviorSanitizer. Result: **PASS**, no findings.
+The scenario set covers:
 
-Scope limit: this covers the unit-test path. The DDS transport has **not** been
-run under sanitizers — Fast DDS's own threads make that a separate exercise.
+- healthy baseline with a positive sample-count control;
+- negative control proving deadline/liveliness/QoS markers are absent while the publisher is intentionally healthy;
+- sequence gap;
+- duplicate;
+- stale sample;
+- schema mismatch;
+- deadline miss;
+- late join with transient-local replay;
+- hard writer death/liveliness expiry;
+- incompatible QoS.
 
-## Live DDS failure-injection scenarios
+### Findings retained from Milestone 1
 
-```bash
-docker build -t rdtf-build docker/
-docker run --rm -v "$PWD":/work rdtf-build bash -c \
-  'cmake -S /work -B /tmp/b -DRDTF_ENABLE_FASTDDS=ON -DCMAKE_BUILD_TYPE=Release && \
-   cmake --build /tmp/b -j && BUILD=/tmp/b bash /work/scripts/run_scenarios.sh'
-```
+**Graceful exit is not the same failure as hard death.** A clean writer exit can unmatch without a liveliness-loss callback. A hard death can leave the lease to expire into liveliness loss. Health logic that watches only one signal is incomplete.
 
-Each scenario is two real processes exchanging real RTPS traffic on an isolated
-domain. Result: **10 passed, 0 failed**.
+**Delivered history can be unsafe history.** A transient-local late join can successfully deliver samples that immediately violate the application's freshness budget. DDS delivery success is not an application safety verdict.
+
+## Milestone 2 — network degradation and recovery
+
+The current 2.14.6 regression run again passed the `tc netem` matrix. One observed run from the green Milestone 3 artifact produced:
+
+| impairment | profile | received | gaps | stale | deadline misses | p50 us | p99 us |
+|---|---|---:|---:|---:|---:|---:|---:|
+| baseline | RELIABLE periodic telemetry | 241 | 0 | 0 | 0 | 220 | 282 |
+| 1% loss | RELIABLE periodic telemetry | 241 | 0 | 0 | 0 | 221 | 132120 |
+| 15% loss | RELIABLE periodic telemetry | 162 | 2 | 65 | 10 | 173075 | 627675 |
+| baseline | BEST_EFFORT high-rate sensor | 241 | 0 | 0 | 0 | 201 | 253 |
+| 1% loss | BEST_EFFORT high-rate sensor | 240 | 1 | 0 | 0 | 189 | 262 |
+| 15% loss | BEST_EFFORT high-rate sensor | 86 | 17 | 0 | 4 | 187 | 285 |
+
+Do not turn one cell into a statistical guarantee. The useful engineering observation is the shape of the failure:
+
+- RELIABLE transport can convert loss into retransmission delay/staleness;
+- BEST_EFFORT can expose loss as missing application samples;
+- both contracts can breach operational timing under sufficiently bad conditions.
+
+### Partition/recovery observation from the same run
 
 ```text
-PASS baseline           <- received=130 anomalies=0
-PASS negative_control   <- no deadline/liveliness/QoS events on the healthy stream
-PASS packet_gap         <- kind=sequence_gap missing=1
-PASS duplicate          <- kind=duplicate
-PASS stale_sample       <- kind=stale
-PASS schema_drift       <- kind=schema_mismatch
-PASS deadline_miss      <- DEADLINE_MISSED
-PASS late_joiner        <- first replayed seq=1, 25 replayed samples flagged stale
-PASS dead_writer        <- LIVELINESS_LOST alive=0
-PASS qos_mismatch       <- INCOMPATIBLE_QOS last_policy_id=11
+partition applied          t=6995 ms
+health degraded/stale      t=7241 ms
+DDS liveliness lost        t=7986 ms
+partition removed          t=16003 ms
+health healthy again       t=16032 ms
+
+time_to_unsafe             246 ms
+time_to_lost               991 ms
+recovery_to_healthy          29 ms
+unsafe-before-lost window   745 ms
 ```
 
-Two controls stop this passing vacuously:
+The application's freshness boundary was crossed **745 ms before** DDS declared the writer lost. Middleware health and application safety are complementary signals.
 
-- **baseline** asserts a *minimum* sample count (>=100), so "0 anomalies" cannot
-  come from a run that moved no data.
-- **negative_control** asserts `DEADLINE_MISSED`, `LIVELINESS_LOST` and
-  `INCOMPATIBLE_QOS` are all **absent** on the healthy stream, so matching them
-  in the failure scenarios means something.
+The slow-reader cases also remained destructive on a healthy network: p99 latency rose into multi-second territory and most processed samples became stale. Network availability alone is not a useful health definition.
 
-Both controls have already caught real defects. The negative control failed on
-its first run: the baseline publisher stopped 5 s before the subscriber's window
-closed, and that trailing silence was a genuine deadline miss. The baseline
-count assertion then caught a second one — the publisher and subscriber windows
-ended at the same moment, so the received count raced the clock and varied
-between 124 and 140 across runs. The publisher now outlasts the subscriber and
-is killed by the harness. Three consecutive full runs: 10/10 each.
+Full Milestone 2 discussion: [NETWORK_DEGRADATION.md](NETWORK_DEGRADATION.md).
 
-## Two findings worth stating
+## Milestone 3 — DDS Security
 
-**A clean process exit is not a liveliness loss.** Terminating the publisher
-normally unmatches the writer and the reader reports `subscription_matched=0` —
-no liveliness callback fires. Only `SIGKILL`, which sends no goodbye message,
-leaves the lease to expire. The scenario now kills the publisher hard, because
-the crashed-process case is the one that matters operationally.
+Full detail: [DDS_SECURITY.md](DDS_SECURITY.md).
 
-**Transient-local replay delivers data that is not fresh.** A reader joining 3 s
-late received all history from sequence 1 — and 25 of those replayed samples
-immediately breached the freshness budget. Delivery succeeded; the state was not
-safe to act on. This is the project's whole thesis, observed rather than argued.
-
-## Two-container transport check
-
-```bash
-docker compose -f docker/docker-compose.yml up --abort-on-container-exit
-```
-
-Inside a single container Fast DDS selects its shared-memory transport and never
-touches UDP, so a one-process demo proves nothing about RTPS on the wire. This
-runs publisher and subscriber in separate containers on a bridge network.
-Observed: discovery completed, `rdtf_samples_published_total 300`, and the
-injected gap, duplicate and stale faults were each detected on the far side.
-
-## Measured performance
-
-### Application validation path (no DDS)
+Result on run `32178914685`: **6 passed, 0 failed**.
 
 ```text
-samples=1000000
-anomalies=0
-elapsed_seconds=0.0197341
-samples_per_second=50673683
+PASS secure_baseline
+PASS untrusted_identity
+PASS unauthorized_writer
+PASS insecure_peer
+PASS plaintext_capture_control
+PASS encrypted_payload_capture
 ```
 
-This is **not** a DDS throughput figure. It measures only the
-sequence/freshness/schema checks, and exists to show that layer is not the
-bottleneck.
+### Secure baseline
 
-### End-to-end DDS latency (real)
-
-Publisher and subscriber as separate processes, 1200 samples at 200 Hz,
-`periodic_telemetry` profile (RELIABLE / TRANSIENT_LOCAL / KEEP_LAST 32):
+Trusted/authorized publisher and subscriber matched and delivered:
 
 ```text
-samples_received      = 1200 / 1200
-latency_min_us        = 36
-latency_mean_us       = 189
-latency_p99_us        = 625
-latency_max_us        = 3898
+samples_received = 300
+latency_min_us    = 159
+latency_p50_us    = 285
+latency_p95_us    = 390
+latency_p99_us    = 412
+latency_p999_us   = 535
+latency_max_us    = 535
+latency_mean_us   = 285.883
 ```
 
-Caveats that must be stated with these numbers:
+These latency values are one CI run, not an SLA.
 
-- computed from the publisher's `source_timestamp`, so it is only valid because
-  both processes share a clock. Across hosts this needs NTP or PTP discipline.
-- measured inside Docker Desktop on macOS — a Linux VM. Bare metal will be
-  faster and, more importantly, will have a different tail.
-- p99 uses nearest-rank over the whole run; there is no warm-up exclusion.
+### Authentication negative
 
-## Milestone 2 — network degradation
+Publisher identity signed by a separate rogue identity CA:
 
-Full matrix, analysis and caveats: [NETWORK_DEGRADATION.md](NETWORK_DEGRADATION.md).
-14 impairment runs, 0 failed. Headline results:
+```text
+application samples received = 0
+```
 
-- 15% loss, RELIABLE: 0 application gaps, 82 stale, p50 249 ms.
-- 15% loss, BEST_EFFORT: 31 gaps, 0 stale, p99 1.25 ms.
-- partition: unsafe at +262 ms, DDS reported lost at +1005 ms — a 743 ms window
-  in which the middleware was still content and the state was not usable.
-- slow consumer on a healthy network: p99 1.14 s, 93% of samples stale.
+### Authorization negative
 
-Two defects were found by the harness rather than by reading the code:
+A publisher with a trusted identity but a signed **subscribe-only** permission was denied when creating the `SystemTelemetry` DataWriter. The publisher exited non-zero and the subscriber received zero application samples.
 
-1. **The recovery counter accepted stale samples.** Post-partition retransmission
-   flushes retained history whose samples are already outside the freshness
-   budget. `HealthMonitor::on_sample` counted them toward the
-   three-consecutive-fresh rule and declared HEALTHY 27 ms after restore, while
-   the detector was flagging the same samples stale. Fixed by passing sample age
-   into the monitor. Mutation-tested: disabling the age guard turns
-   `stale retransmission burst does not restore health` red, restoring it turns
-   it green.
-2. **Two clock origins in the recovery measurement.** The harness timed faults on
-   its own wall clock while `HEALTH_AT` was relative to the subscriber's post-init
-   start, understating recovery by the DDS initialisation time. The subscriber
-   now emits `EPOCH_MS` and the analyser reconciles the frames.
+Fast DDS access-control evidence included:
 
-Unit assertions: 25, all passing. The two new blocks cover hysteresis in both
-directions and the stale-recovery regression.
+```text
+SystemTelemetry topic not found in allow rule
+Problem creating associated Writer
+publisher failed to start
+```
 
-## Still not proven
+### Secure vs insecure peer
 
-Do not claim any of these:
+A participant with governance configured to reject unauthenticated peers received:
 
-- statistical claims about the latency tail — one run per impairment cell;
-- latency under CPU contention or with many participants;
-- bounded resource limits, writer-history exhaustion, large payloads;
-- multiple publishers or multiple keyed instances;
-- DDS Security: authentication, access control, encryption — not implemented;
-- malformed/adversarial payload handling;
-- Fast DDS 3.x compatibility — the code is built against the 2.11 API;
-- RTI Connext — no adapter written, no licence, nothing attempted;
-- sanitizer cleanliness of the DDS transport path.
+```text
+application samples from insecure publisher = 0
+```
+
+### Paired packet-capture control
+
+Unique application marker:
+
+```text
+RDTF_WIRE_MARKER_7d91c4
+```
+
+Observed in the same successful CI artifact:
+
+```text
+plaintext pcap marker occurrences = 300
+encrypted pcap marker occurrences = 0
+secure samples received            = 300
+```
+
+The paired plaintext run is essential. Without it, absence from the encrypted capture could be caused by a blind/wrong-interface packet capture.
+
+The first security run found a **harness bug**: `strings | grep -q` under `pipefail` falsely failed the plaintext positive control because `grep -q` exited early and `strings` received SIGPIPE. The pcap itself contained the marker. The corrected harness uses a binary-safe direct search and then passed 6/6. Assertions were not weakened.
+
+Scope limit: certificate/CA identity strings may still be visible in security-handshake traffic. The test proves the application marker is not plaintext in the captured secure DDS traffic; it does not prove every handshake field is opaque.
+
+## What remains unproven
+
+Do not claim:
+
+- RTI Connext implementation or interoperability;
+- Fast DDS 3.x compatibility;
+- security or safety certification;
+- production certificate issuance, revocation or zero-downtime rotation;
+- HSM-backed private keys;
+- resistance to arbitrary malformed/hostile RTPS;
+- tamper-evident JSONL evidence;
+- statistical tail-latency guarantees;
+- many-participant/CPU-contention latency;
+- bounded resource-limit or writer-history-exhaustion behavior;
+- large-payload behavior;
+- multi-writer authority/failover;
+- sanitizer cleanliness of the live DDS transport path.
+
+These gaps drive the next experiments rather than being hidden behind a feature list.
