@@ -2,12 +2,12 @@
 // resulting state is safe to use, and writes the evidence either way.
 #include "resilientdds/dds_transport.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <string>
-#include <atomic>
 #include <thread>
 
 using namespace resilientdds;
@@ -27,6 +27,8 @@ int main(int argc, char** argv) {
     std::string source_id = "radar-01";
     std::string audit_path = "resilientdds-audit.jsonl";
     std::string metrics_path;
+    std::string security_dir;
+    std::string security_role = "subscriber";
     int duration_s = 10;
     int start_delay_ms = 0;
     int poll_ms = 20;
@@ -43,6 +45,8 @@ int main(int argc, char** argv) {
         else if (k == "--source-id") source_id = v;
         else if (k == "--audit-out") audit_path = v;
         else if (k == "--metrics-out") metrics_path = v;
+        else if (k == "--security-dir") security_dir = v;
+        else if (k == "--security-role") security_role = v;
         else if (k == "--duration-s") duration_s = std::atoi(v);
         else if (k == "--start-delay-ms") start_delay_ms = std::atoi(v);
         else if (k == "--max-age-ms") max_age_ms = std::atoll(v);
@@ -53,8 +57,6 @@ int main(int argc, char** argv) {
         if (std::string(argv[i]) == "--allow-shm") allow_shm = true;
     }
 
-    // A late joiner is the whole point of transient-local durability; make it
-    // reproducible instead of a race.
     if (start_delay_ms > 0) {
         std::cout << "LATE_JOIN delay_ms=" << start_delay_ms << "\n" << std::flush;
         std::this_thread::sleep_for(std::chrono::milliseconds(start_delay_ms));
@@ -67,23 +69,21 @@ int main(int argc, char** argv) {
     TelemetrySubscriber subscriber(detector, health, metrics, audit.good() ? &audit : nullptr);
 
     const QosProfile profile = pick(profile_name);
+    const auto security = security_from_directory(security_dir, security_role);
     subscriber.set_source(source_id);
     subscriber.set_processing_delay_us(process_delay_us);
     if (!subscriber.start(domain, topic, profile,
-                          allow_shm ? TransportMode::defaults : TransportMode::udp_only)) {
+                          allow_shm ? TransportMode::defaults : TransportMode::udp_only,
+                          security.enabled ? &security : nullptr)) {
         std::cerr << "subscriber failed to start\n";
         return 1;
     }
     std::cout << "SUBSCRIBER up domain=" << domain << " topic=" << topic
-              << " profile=" << profile.name << "\n" << std::flush;
+              << " profile=" << profile.name << " security="
+              << (security.enabled ? "on" : "off");
+    if (security.enabled) std::cout << " role=" << security_role;
+    std::cout << "\n" << std::flush;
 
-    // Health must move when data STOPS, not only when it arrives. A monitor
-    // driven purely by callbacks cannot report silence, so poll it and emit a
-    // timeline the harness can turn into recovery timings.
-    // The harness marks faults on its own wall clock, but HEALTH_AT is relative
-    // to this point -- which is AFTER process start and DDS init. Publish the
-    // anchor so the two frames can be reconciled exactly instead of assumed
-    // equal, which silently understated recovery time by the init duration.
     const auto t_start = now_ns();
     std::cout << "EPOCH_MS=" << t_start / 1'000'000 << "\n" << std::flush;
     std::atomic<bool> stop{false};
@@ -114,9 +114,8 @@ int main(int argc, char** argv) {
 
     const auto snap = health.snapshot(source_id, now_ns());
     metrics.gauge("rdtf_source_health_state",
-                  snap.state == HealthState::healthy   ? 2.0
-                  : snap.state == HealthState::degraded ? 1.0
-                                                        : 0.0);
+                  snap.state == HealthState::healthy ? 2.0
+                  : snap.state == HealthState::degraded ? 1.0 : 0.0);
     std::cout << "HEALTH source=" << source_id << " state=" << to_string(snap.state)
               << " reason=\"" << to_string(snap.reason) << "\"\n";
 
