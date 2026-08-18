@@ -66,6 +66,17 @@ if(RDTF_ENABLE_FASTDDS)
     target_link_libraries(resilientdds_dds_publisher PRIVATE resilientdds_dds)
     add_executable(resilientdds_dds_subscriber apps/dds_subscriber.cpp)
     target_link_libraries(resilientdds_dds_subscriber PRIVATE resilientdds_dds)
+
+    # Milestone 4A experiment probes. They intentionally use the generated DDS
+    # type directly so ownership semantics can be falsified before the reusable
+    # transport adapter gains a new authority API.
+    add_executable(resilientdds_authority_writer apps/authority_writer.cpp)
+    target_include_directories(resilientdds_authority_writer PRIVATE ${RDTF_GEN_DIR})
+    target_link_libraries(resilientdds_authority_writer PRIVATE resilientdds_dds)
+
+    add_executable(resilientdds_authority_reader apps/authority_reader.cpp)
+    target_include_directories(resilientdds_authority_reader PRIVATE ${RDTF_GEN_DIR})
+    target_link_libraries(resilientdds_authority_reader PRIVATE resilientdds_dds)
 endif()
 
 if(RDTF_BUILD_TESTS)
