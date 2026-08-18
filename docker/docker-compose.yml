@@ -1,11 +1,13 @@
-# Two containers on a user-defined bridge network. Inside one container Fast DDS
-# takes the shared-memory transport and never touches UDP, so a single-process
-# demo proves nothing about RTPS on the wire. This forces it.
+# Two containers on a user-defined bridge network. The applications default to
+# UDP-only transport, and separate network namespaces prove that the data plane
+# is crossing a real network rather than falling back to shared memory.
 #
 #   docker compose -f docker/docker-compose.yml up --abort-on-container-exit
 services:
   subscriber:
-    build: .
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
     image: rdtf-build
     working_dir: /work
     volumes: [ "..:/work" ]
@@ -19,7 +21,9 @@ services:
         && /work/build-linux/resilientdds_dds_subscriber --domain 12 --duration-s 25 --profile critical_control
 
   publisher:
-    build: .
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
     image: rdtf-build
     working_dir: /work
     volumes: [ "..:/work" ]

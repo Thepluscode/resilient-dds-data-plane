@@ -20,7 +20,7 @@ if [[ ! -f "$PKI/main/governance.smime" ]]; then
 fi
 
 metric() {
-    grep -oE "^$2 [0-9.]+" "$1" 2>/dev/null | awk '{print $2}' | head -1
+    awk -v metric="$2" '$1 == metric { print $2; exit }' "$1" 2>/dev/null
 }
 assert_zero_received() {
     local prom=$1 label=$2
@@ -128,7 +128,7 @@ fi
 
 # Wire-control pair. A plaintext run must expose a unique payload marker in the
 # pcap; otherwise the encrypted test below would be meaningless because the
-# capture/grep path itself could be blind.
+# capture path itself could be blind.
 if [[ $(id -u) -ne 0 ]]; then
     echo "wire proof requires root (tcpdump); run this harness in the supplied container" >&2
     exit 2
@@ -156,8 +156,11 @@ capture_run() {
 
 marker="RDTF_WIRE_MARKER_7d91c4"
 capture_run plaintext_capture_control 145 no "$marker"
+# Search the binary capture directly. Using `strings | grep -q` under pipefail is
+# incorrect: grep exits on the first match, strings gets SIGPIPE, and a valid
+# positive control is reported as failed.
 if assert_received "$OUT/plaintext_capture_control.prom" plaintext_capture_control && \
-   strings "$OUT/plaintext_capture_control.pcap" | grep -Fq "$marker"; then
+   grep -aFq "$marker" "$OUT/plaintext_capture_control.pcap"; then
     record plaintext_capture_control PASS "pcap control sees plaintext application marker"
 else
     record plaintext_capture_control FAIL "capture control could not see expected plaintext marker"
@@ -165,7 +168,7 @@ fi
 
 capture_run encrypted_payload_capture 146 yes "$marker"
 if assert_received "$OUT/encrypted_payload_capture.prom" encrypted_payload_capture && \
-   ! strings "$OUT/encrypted_payload_capture.pcap" | grep -Fq "$marker"; then
+   ! grep -aFq "$marker" "$OUT/encrypted_payload_capture.pcap"; then
     record encrypted_payload_capture PASS "secure peers moved data; plaintext marker absent from pcap"
 else
     record encrypted_payload_capture FAIL "wire marker remained visible or secure data did not move"
