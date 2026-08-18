@@ -1,0 +1,4 @@
+samples=1000000
+anomalies=0
+elapsed_seconds=0.0197341
+samples_per_second=50673683

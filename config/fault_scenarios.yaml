@@ -1,0 +1,56 @@
+# Descriptive index of the scenarios in scripts/run_scenarios.sh.
+# The script is the authority; this file exists to read, not to execute.
+scenarios:
+  - name: baseline
+    intent: positive control — a healthy stream must move real data and flag nothing
+    action: 20 Hz for the whole subscriber window, publisher outlives the subscriber
+    expected: { samples_received: ">=100", anomalies: 0 }
+
+  - name: negative_control
+    intent: prove the status assertions below are not vacuous
+    action: inspect the baseline log
+    expected: { deadline_missed: absent, liveliness_lost: absent, incompatible_qos: absent }
+
+  - name: packet_gap
+    intent: prove sequence-gap detection quantifies the loss
+    action: publisher skips sequence 20
+    expected: { anomaly: sequence_gap, missing_samples: 1 }
+
+  - name: duplicate
+    intent: prove the same sequence arriving twice is caught
+    action: publisher writes sequence 20 twice
+    expected: { anomaly: duplicate }
+
+  - name: stale_sample
+    intent: prove stale-but-delivered data is not mistaken for healthy data
+    action: publisher backdates source_timestamp by 2 s
+    expected: { anomaly: stale }
+
+  - name: schema_drift
+    intent: prove incompatible producer evolution is surfaced, not silently read
+    action: publisher emits schema_version 2 to a v1 consumer
+    expected: { anomaly: schema_mismatch }
+
+  - name: deadline_miss
+    intent: prove a stalled writer breaches the reader's deadline contract
+    action: publisher sleeps 2 s mid-stream against a 250 ms deadline
+    expected: { callback: on_requested_deadline_missed }
+
+  - name: late_joiner
+    intent: prove transient-local replay works AND that replayed state is stale
+    action: subscriber starts 3 s after the publisher
+    qos: TRANSIENT_LOCAL + RELIABLE
+    expected: { first_sample_sequence: 1, anomaly: stale, stale_count: ">=20" }
+
+  - name: dead_writer
+    intent: prove a crashed publisher becomes operationally visible
+    # A clean exit does NOT do this: it unmatches the writer and no liveliness
+    # callback fires. Only an ungraceful death leaves the lease to expire.
+    action: SIGKILL the publisher, no goodbye message
+    qos: MANUAL_BY_TOPIC liveliness, 500 ms lease
+    expected: { callback: on_liveliness_changed, alive_count: 0 }
+
+  - name: qos_mismatch
+    intent: prove incompatible endpoint contracts are reported, not silently unmatched
+    action: BEST_EFFORT writer against a RELIABLE reader
+    expected: { callback: on_requested_incompatible_qos }

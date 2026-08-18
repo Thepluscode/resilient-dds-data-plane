@@ -1,0 +1,40 @@
+# Two containers on a user-defined bridge network. Inside one container Fast DDS
+# takes the shared-memory transport and never touches UDP, so a single-process
+# demo proves nothing about RTPS on the wire. This forces it.
+#
+#   docker compose -f docker/docker-compose.yml up --abort-on-container-exit
+services:
+  subscriber:
+    build: .
+    image: rdtf-build
+    working_dir: /work
+    volumes: [ "..:/work" ]
+    networks: [ rtps ]
+    command:
+      - bash
+      - -c
+      - >-
+        cmake -S /work -B /work/build-linux -DCMAKE_BUILD_TYPE=Release -DRDTF_ENABLE_FASTDDS=ON >/dev/null
+        && cmake --build /work/build-linux -j"$$(nproc)" >/dev/null
+        && /work/build-linux/resilientdds_dds_subscriber --domain 12 --duration-s 25 --profile critical_control
+
+  publisher:
+    build: .
+    image: rdtf-build
+    working_dir: /work
+    volumes: [ "..:/work" ]
+    networks: [ rtps ]
+    depends_on: [ subscriber ]
+    # The subscriber owns the build; wait for the artifact rather than racing it.
+    command:
+      - bash
+      - -c
+      - >-
+        while [ ! -x /work/build-linux/resilientdds_dds_publisher ]; do sleep 2; done
+        && sleep 3
+        && /work/build-linux/resilientdds_dds_publisher --domain 12 --profile critical_control
+        --count 300 --rate-hz 20 --drop-at 40 --duplicate-at 80 --stale-at 120
+
+networks:
+  rtps:
+    driver: bridge

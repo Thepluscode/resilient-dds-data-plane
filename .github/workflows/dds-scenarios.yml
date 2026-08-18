@@ -1,0 +1,30 @@
+name: DDS failure scenarios
+
+on: [push, pull_request]
+
+jobs:
+  scenarios:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Fast DDS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake build-essential default-jre-headless fastddsgen libfastrtps-dev
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DRDTF_ENABLE_FASTDDS=ON
+          cmake --build build -j"$(nproc)"
+      - name: Core unit tests
+        run: ctest --test-dir build --output-on-failure
+      - name: Failure-injection scenarios over RTPS
+        run: BUILD=build OUT=evidence ./scripts/run_scenarios.sh
+      - name: Network degradation matrix
+        # GitHub runners allow tc on loopback; NET_ADMIN is available to the job.
+        run: DURATION=6 BUILD=build OUT=evidence sudo -E ./scripts/run_netem.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dds-evidence
+          path: evidence/

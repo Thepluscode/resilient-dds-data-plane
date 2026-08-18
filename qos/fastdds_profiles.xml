@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <profiles>
+    <data_writer profile_name="critical_control_writer">
+      <qos>
+        <reliability><kind>RELIABLE</kind></reliability>
+        <durability><kind>TRANSIENT_LOCAL</kind></durability>
+        <history><kind>KEEP_LAST</kind><depth>8</depth></history>
+        <deadline><period><nanosec>100000000</nanosec></period></deadline>
+        <liveliness>
+          <kind>MANUAL_BY_TOPIC</kind>
+          <lease_duration><nanosec>500000000</nanosec></lease_duration>
+          <announcement_period><nanosec>100000000</nanosec></announcement_period>
+        </liveliness>
+      </qos>
+    </data_writer>
+
+    <data_reader profile_name="critical_control_reader">
+      <qos>
+        <reliability><kind>RELIABLE</kind></reliability>
+        <durability><kind>TRANSIENT_LOCAL</kind></durability>
+        <history><kind>KEEP_LAST</kind><depth>8</depth></history>
+        <deadline><period><nanosec>100000000</nanosec></period></deadline>
+        <liveliness>
+          <kind>MANUAL_BY_TOPIC</kind>
+          <lease_duration><nanosec>500000000</nanosec></lease_duration>
+        </liveliness>
+      </qos>
+    </data_reader>
+
+    <data_writer profile_name="periodic_telemetry_writer">
+      <qos>
+        <reliability><kind>RELIABLE</kind></reliability>
+        <durability><kind>TRANSIENT_LOCAL</kind></durability>
+        <history><kind>KEEP_LAST</kind><depth>32</depth></history>
+        <deadline><period><nanosec>250000000</nanosec></period></deadline>
+        <liveliness><kind>AUTOMATIC</kind><lease_duration><sec>1</sec></lease_duration></liveliness>
+      </qos>
+    </data_writer>
+
+    <data_reader profile_name="periodic_telemetry_reader">
+      <qos>
+        <reliability><kind>RELIABLE</kind></reliability>
+        <durability><kind>TRANSIENT_LOCAL</kind></durability>
+        <history><kind>KEEP_LAST</kind><depth>32</depth></history>
+        <deadline><period><nanosec>250000000</nanosec></period></deadline>
+        <liveliness><kind>AUTOMATIC</kind><lease_duration><sec>1</sec></lease_duration></liveliness>
+      </qos>
+    </data_reader>
+
+    <data_writer profile_name="high_rate_sensor_writer">
+      <qos>
+        <reliability><kind>BEST_EFFORT</kind></reliability>
+        <durability><kind>VOLATILE</kind></durability>
+        <history><kind>KEEP_LAST</kind><depth>4</depth></history>
+        <deadline><period><nanosec>50000000</nanosec></period></deadline>
+      </qos>
+    </data_writer>
+
+    <data_reader profile_name="high_rate_sensor_reader">
+      <qos>
+        <reliability><kind>BEST_EFFORT</kind></reliability>
+        <durability><kind>VOLATILE</kind></durability>
+        <history><kind>KEEP_LAST</kind><depth>4</depth></history>
+        <deadline><period><nanosec>50000000</nanosec></period></deadline>
+      </qos>
+    </data_reader>
+  </profiles>
+</dds>

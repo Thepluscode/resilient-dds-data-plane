@@ -1,0 +1,19 @@
+ANOMALY source=radar-01 seq=8 kind=sequence_gap detail="one or more samples were not observed"
+ANOMALY source=radar-01 seq=7 kind=out_of_order detail="sequence regressed"
+ANOMALY source=radar-01 seq=8 kind=duplicate detail="same sequence observed twice"
+ANOMALY source=radar-01 seq=8 kind=duplicate detail="same sequence observed twice"
+ANOMALY source=radar-01 seq=10 kind=sequence_gap detail="one or more samples were not observed"
+ANOMALY source=radar-01 seq=12 kind=stale detail="sample exceeded freshness budget"
+ANOMALY source=radar-01 seq=15 kind=schema_mismatch detail="expected schema 1 but received 2"
+
+HEALTH source=radar-01 state=degraded reason="stale_data"
+
+# Prometheus-style metrics
+rdtf_anomaly_duplicate_total 2
+rdtf_anomaly_out_of_order_total 1
+rdtf_anomaly_schema_mismatch_total 1
+rdtf_anomaly_sequence_gap_total 2
+rdtf_anomaly_stale_total 1
+rdtf_deadline_missed_total 1
+rdtf_samples_received_total 20
+rdtf_source_health_state 1.000

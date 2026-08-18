@@ -1,0 +1,21 @@
+module resilientdds {
+    @appendable
+    struct SystemTelemetry {
+        @key string<64> source_id;
+        unsigned long long sequence_number;
+        long long source_timestamp_ns;
+        long long ingest_timestamp_ns;
+        double temperature_c;
+        double voltage_v;
+        unsigned long health_flags;
+        unsigned long schema_version;
+    };
+
+    @appendable
+    struct HealthEvent {
+        @key string<64> source_id;
+        unsigned long event_code;
+        long long observed_at_ns;
+        string<128> reason;
+    };
+};
