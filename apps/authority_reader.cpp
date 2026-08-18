@@ -23,13 +23,13 @@
 #include <thread>
 #include <unordered_map>
 
-namespace dds = eprosima::fastdds::dds;
+namespace fdds = eprosima::fastdds::dds;
 
 namespace {
 
 enum class OwnershipMode { shared, exclusive };
 
-std::string handle_hex(const dds::InstanceHandle_t& handle) {
+std::string handle_hex(const fdds::InstanceHandle_t& handle) {
     std::ostringstream out;
     out << std::hex << std::setfill('0');
     for (std::size_t i = 0; i < 16; ++i) {
@@ -44,20 +44,20 @@ std::int64_t now_ns() {
         .count();
 }
 
-struct ReaderListener final : dds::DataReaderListener {
+struct ReaderListener final : fdds::DataReaderListener {
     std::atomic<std::uint64_t> samples{0};
     std::atomic<int> matches{0};
     std::unordered_map<std::string, std::string> visible_owner;
 
-    void on_subscription_matched(dds::DataReader*, const dds::SubscriptionMatchedStatus& status) override {
+    void on_subscription_matched(fdds::DataReader*, const fdds::SubscriptionMatchedStatus& status) override {
         matches.store(status.current_count);
         std::cout << "MATCH writers=" << status.current_count << " at_ns=" << now_ns() << "\n"
                   << std::flush;
     }
 
-    void on_data_available(dds::DataReader* reader) override {
+    void on_data_available(fdds::DataReader* reader) override {
         resilientdds::SystemTelemetry wire;
-        dds::SampleInfo info;
+        fdds::SampleInfo info;
         while (reader->take_next_sample(&wire, &info) ==
                eprosima::fastrtps::types::ReturnCode_t::RETCODE_OK) {
             if (!info.valid_data) continue;
@@ -114,37 +114,37 @@ Options parse(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     const Options o = parse(argc, argv);
-    auto* factory = dds::DomainParticipantFactory::get_instance();
+    auto* factory = fdds::DomainParticipantFactory::get_instance();
 
-    auto participant_qos = dds::PARTICIPANT_QOS_DEFAULT;
+    auto participant_qos = fdds::PARTICIPANT_QOS_DEFAULT;
     participant_qos.transport().use_builtin_transports = false;
     participant_qos.transport().user_transports.push_back(
         std::make_shared<eprosima::fastdds::rtps::UDPv4TransportDescriptor>());
     auto* participant = factory->create_participant(o.domain, participant_qos);
     if (participant == nullptr) return 2;
 
-    dds::TypeSupport type(new resilientdds::SystemTelemetryPubSubType());
+    fdds::TypeSupport type(new resilientdds::SystemTelemetryPubSubType());
     type.register_type(participant);
     const auto ownership_kind = o.ownership == OwnershipMode::exclusive
-                                    ? dds::EXCLUSIVE_OWNERSHIP_QOS
-                                    : dds::SHARED_OWNERSHIP_QOS;
-    auto topic_qos = dds::TOPIC_QOS_DEFAULT;
+                                    ? fdds::EXCLUSIVE_OWNERSHIP_QOS
+                                    : fdds::SHARED_OWNERSHIP_QOS;
+    auto topic_qos = fdds::TOPIC_QOS_DEFAULT;
     topic_qos.ownership().kind = ownership_kind;
     auto* topic = participant->create_topic(o.topic, type.get_type_name(), topic_qos);
-    auto* subscriber = participant->create_subscriber(dds::SUBSCRIBER_QOS_DEFAULT);
+    auto* subscriber = participant->create_subscriber(fdds::SUBSCRIBER_QOS_DEFAULT);
     if (topic == nullptr || subscriber == nullptr) {
         participant->delete_contained_entities();
         factory->delete_participant(participant);
         return 2;
     }
 
-    auto reader_qos = dds::DATAREADER_QOS_DEFAULT;
-    reader_qos.reliability().kind = dds::RELIABLE_RELIABILITY_QOS;
-    reader_qos.durability().kind = dds::TRANSIENT_LOCAL_DURABILITY_QOS;
-    reader_qos.history().kind = dds::KEEP_LAST_HISTORY_QOS;
+    auto reader_qos = fdds::DATAREADER_QOS_DEFAULT;
+    reader_qos.reliability().kind = fdds::RELIABLE_RELIABILITY_QOS;
+    reader_qos.durability().kind = fdds::TRANSIENT_LOCAL_DURABILITY_QOS;
+    reader_qos.history().kind = fdds::KEEP_LAST_HISTORY_QOS;
     reader_qos.history().depth = 8;
     reader_qos.deadline().period = {0, 100'000'000};
-    reader_qos.liveliness().kind = dds::AUTOMATIC_LIVELINESS_QOS;
+    reader_qos.liveliness().kind = fdds::AUTOMATIC_LIVELINESS_QOS;
     reader_qos.liveliness().lease_duration = {0, 500'000'000};
     reader_qos.ownership().kind = ownership_kind;
 

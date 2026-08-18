@@ -24,14 +24,14 @@
 #include <string>
 #include <thread>
 
-namespace dds = eprosima::fastdds::dds;
+namespace fdds = eprosima::fastdds::dds;
 using resilientdds::kCurrentSchemaVersion;
 
 namespace {
 
 enum class OwnershipMode { shared, exclusive };
 
-std::string handle_hex(const dds::InstanceHandle_t& handle) {
+std::string handle_hex(const fdds::InstanceHandle_t& handle) {
     std::ostringstream out;
     out << std::hex << std::setfill('0');
     for (std::size_t i = 0; i < 16; ++i) {
@@ -40,9 +40,9 @@ std::string handle_hex(const dds::InstanceHandle_t& handle) {
     return out.str();
 }
 
-struct WriterListener final : dds::DataWriterListener {
+struct WriterListener final : fdds::DataWriterListener {
     std::atomic<int> matches{0};
-    void on_publication_matched(dds::DataWriter*, const dds::PublicationMatchedStatus& status) override {
+    void on_publication_matched(fdds::DataWriter*, const fdds::PublicationMatchedStatus& status) override {
         matches.store(status.current_count);
     }
 };
@@ -88,9 +88,9 @@ std::int64_t now_ns() {
 
 int main(int argc, char** argv) {
     const Options o = parse(argc, argv);
-    auto* factory = dds::DomainParticipantFactory::get_instance();
+    auto* factory = fdds::DomainParticipantFactory::get_instance();
 
-    auto participant_qos = dds::PARTICIPANT_QOS_DEFAULT;
+    auto participant_qos = fdds::PARTICIPANT_QOS_DEFAULT;
     participant_qos.transport().use_builtin_transports = false;
     participant_qos.transport().user_transports.push_back(
         std::make_shared<eprosima::fastdds::rtps::UDPv4TransportDescriptor>());
@@ -98,29 +98,29 @@ int main(int argc, char** argv) {
     auto* participant = factory->create_participant(o.domain, participant_qos);
     if (participant == nullptr) return 2;
 
-    dds::TypeSupport type(new resilientdds::SystemTelemetryPubSubType());
+    fdds::TypeSupport type(new resilientdds::SystemTelemetryPubSubType());
     type.register_type(participant);
 
     const auto ownership_kind = o.ownership == OwnershipMode::exclusive
-                                    ? dds::EXCLUSIVE_OWNERSHIP_QOS
-                                    : dds::SHARED_OWNERSHIP_QOS;
-    auto topic_qos = dds::TOPIC_QOS_DEFAULT;
+                                    ? fdds::EXCLUSIVE_OWNERSHIP_QOS
+                                    : fdds::SHARED_OWNERSHIP_QOS;
+    auto topic_qos = fdds::TOPIC_QOS_DEFAULT;
     topic_qos.ownership().kind = ownership_kind;
     auto* topic = participant->create_topic(o.topic, type.get_type_name(), topic_qos);
-    auto* publisher = participant->create_publisher(dds::PUBLISHER_QOS_DEFAULT);
+    auto* publisher = participant->create_publisher(fdds::PUBLISHER_QOS_DEFAULT);
     if (topic == nullptr || publisher == nullptr) {
         participant->delete_contained_entities();
         factory->delete_participant(participant);
         return 2;
     }
 
-    auto writer_qos = dds::DATAWRITER_QOS_DEFAULT;
-    writer_qos.reliability().kind = dds::RELIABLE_RELIABILITY_QOS;
-    writer_qos.durability().kind = dds::TRANSIENT_LOCAL_DURABILITY_QOS;
-    writer_qos.history().kind = dds::KEEP_LAST_HISTORY_QOS;
+    auto writer_qos = fdds::DATAWRITER_QOS_DEFAULT;
+    writer_qos.reliability().kind = fdds::RELIABLE_RELIABILITY_QOS;
+    writer_qos.durability().kind = fdds::TRANSIENT_LOCAL_DURABILITY_QOS;
+    writer_qos.history().kind = fdds::KEEP_LAST_HISTORY_QOS;
     writer_qos.history().depth = 8;
     writer_qos.deadline().period = {0, 100'000'000};
-    writer_qos.liveliness().kind = dds::AUTOMATIC_LIVELINESS_QOS;
+    writer_qos.liveliness().kind = fdds::AUTOMATIC_LIVELINESS_QOS;
     writer_qos.liveliness().lease_duration = {0, 500'000'000};
     writer_qos.ownership().kind = ownership_kind;
     writer_qos.ownership_strength().value = o.strength;
