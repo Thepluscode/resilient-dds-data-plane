@@ -20,134 +20,118 @@ screen. The direction of every comparison is stable; the exact figures are not.
 > This is a C++17 reliability lab built on Fast DDS. It is not a publisher and
 > subscriber demo — the interesting part is what happens when the assumptions
 > underneath one start to fail. Everything you are about to see runs as real
-> processes over real RTPS, and it all runs in CI on every push.
+> processes over real RTPS, and the evidence chain is reproduced in CI.
 >
 > The question the whole project asks is: when things start to break, how do you
 > know the state you are holding is still safe to act on?
 
 ---
 
-## Act 1 — the silent instance cap (~35 s)
+## Act 1 — the silent instance cap
 
 **Before it runs:**
 
 > First one is the result I did not expect. I am publishing thirty-two distinct
-> keyed instances. Nothing is misconfigured.
+> keyed instances.
 
-**When `10 / 32` appears — pause here, it is the whole act:**
+**When `10 / 32` appears:**
 
-> Ten. Twenty-two keys were never delivered. No error, no exception, no
-> sample-lost callback, no anomaly from the detection layer I built. Every
-> diagnostic in the project stays green while a third of the state does not
-> exist.
+> Ten. Twenty-two keys were never delivered. No exception, no sample-lost
+> callback and no anomaly from my detection layer. Every diagnostic can stay
+> green while most of the expected state simply does not exist.
 >
-> Fast DDS defaults `max_instances` to ten. It is a default, so nothing warns
-> you — the topic is simply lossy until you set it.
+> Fast DDS defaults `max_instances` to ten. The control run proves the default is
+> the mechanism; the configured run raises the instance and sample pool limits
+> and delivers all thirty-two.
 
-**When `32 / 32` appears:**
-
-> Same workload with `max_instances` raised. All thirty-two.
->
-> The first run matters more than the second. Without it, "we deliver 32 keys"
-> proves nothing — I would not know whether the limit was ever real. The test
-> asserts the default caps at exactly ten, so if a future Fast DDS changes that,
-> the suite fails loudly instead of quietly passing.
-
-**If asked "how did you find it":** the fan-out suite had a scenario asking
-whether resource limits are global or per-instance. It failed at 10 of 32 and I
-went looking. Raising the limit alone then rejected the endpoint — Fast DDS
-enforces `max_samples >= max_instances × max_samples_per_instance` — so the pool
-is now sized as instances × history depth.
+**If asked how it was found:** the fan-out experiment was specifically testing
+resource isolation across keyed state. Raising `max_instances` alone then exposed
+a second constraint: `max_samples` has to be sized consistently with instances
+and per-instance history.
 
 ---
 
-## Act 2 — loss becomes latency (~30 s)
+## Act 2 — loss becomes latency
 
 **Before:**
 
-> Fifteen percent packet loss, applied with `tc netem`. Same impairment, two QoS
+> Fifteen percent packet loss, injected with `tc netem`. Same impairment, two QoS
 > contracts. I expected loss to show up as missing samples.
 
 **On the two lines:**
 
-> It does not, under RELIABLE. Zero gaps — every sample arrived — but around
-> sixty of them arrived stale, and the median latency is about 174 milliseconds
-> against a 250 millisecond freshness budget. Retransmission recovered the data
-> and spent almost the whole time budget doing it.
+> Under RELIABLE it can show up as latency instead. In a representative run,
+> gaps stayed at zero while dozens of samples became stale and median latency
+> moved into the hundreds of milliseconds.
 >
-> Best-effort, same loss: thirty-two gaps, nothing stale, median latency about
-> two hundred microseconds.
+> Under BEST_EFFORT the same loss appeared as visible gaps while latency stayed
+> around hundreds of microseconds.
 >
-> Neither is safer. Reliable trades timeliness for completeness, best-effort
-> trades completeness for timeliness. The right answer depends on whether this
-> consumer would rather have old data or missing data — and only the application
-> knows that. That is the argument for treating QoS as a contract rather than
-> tuning.
+> Neither policy is automatically safer. The application has to decide whether
+> old data or missing data is the less dangerous failure mode. That is why this
+> project treats QoS as an application contract rather than middleware tuning.
 
 ---
 
-## Act 3 — the unsafe window (~30 s)
+## Act 3 — the unsafe window
 
 **Before:**
 
-> Full partition mid-stream, then restore. Watch the two timings.
+> Full partition mid-stream, then restore. Watch the freshness and liveliness
+> timings separately.
 
 **On the output:**
 
-> The consumer's freshness budget broke about 260 milliseconds after the
-> partition. DDS declared the writer lost at about a second. That gap — roughly
-> three quarters of a second — is time in which the middleware was perfectly
-> content and the state was already unusable.
+> The application freshness budget breaks a few hundred milliseconds after the
+> partition, while DDS liveliness loss arrives around a second. Across observed
+> runs that leaves roughly three quarters of a second where communication health
+> has not yet declared the writer lost but the state is already unsafe to use.
 >
-> For a 20 millisecond control loop that is about thirty-seven cycles of acting
-> on state that nothing had flagged. It is why the application freshness guard
-> and the DDS liveliness callback are complementary rather than duplicated
-> effort: a system that alarms only on liveliness has a silent unsafe window
-> equal to its lease duration.
+> For a 20 millisecond control loop that is dozens of cycles. Freshness and
+> liveliness therefore answer different questions; one cannot replace the other.
 
-**If asked about recovery:** it comes back in tens of milliseconds, but that
-number was wrong the first time I measured it. The writer flushes retained
-history on restore and those samples are already stale; my health monitor
-counted them as evidence of recovery and declared healthy while the detector was
-flagging the very same samples. Recovery now only counts samples inside the
-freshness budget.
+**If asked about recovery:** retained history made the first recovery measurement
+wrong. Replayed samples arrived after connectivity returned but were already
+stale. Recovery now requires a fresh sample, not merely renewed delivery.
 
 ---
 
-## Act 4 — write() returned true (~30 s)
+## Act 4 — `write()` returned true
 
 **Before:**
 
-> Producer at 400 hertz, consumer that can only handle about 250 a second. No
-> network fault at all. Same overload, two writer history contracts.
+> Producer faster than its consumer, with no network fault. Same overload, two
+> history contracts.
 
 **On the output:**
 
-> KEEP_LAST: zero write failures. Every single write returned success — and the
-> reader still saw gaps. The writer overwrites its oldest unacknowledged sample
-> to make room, so the producer is never told anything was dropped. For
-> telemetry where the newest value supersedes the last, that is correct. For a
-> command channel it is a lost command with no error anywhere in the system.
+> `KEEP_LAST` can return success while the reader still observes gaps because old
+> unacknowledged state is overwritten. That can be correct for telemetry where
+> the newest value supersedes the previous one, but it would be a dangerous
+> contract for non-idempotent command semantics.
 >
-> KEEP_ALL: the same loss arrives as failed writes and blocking the producer can
-> actually act on — shed load, alarm, fail over.
+> Bounded `KEEP_ALL` makes the overload producer-visible through blocking,
+> timeout or resource exhaustion. The project separately proved immediate
+> `OUT_OF_RESOURCES` and bounded `TIMEOUT` paths instead of collapsing both into
+> one generic publish error.
 >
-> So the producer-side version of the thesis: `write()` returning true does not
-> mean the sample will be delivered.
+> So the producer-side version of the thesis is: `write()` returning true does
+> not prove the sample will arrive.
 
 ---
 
 ## Close — 20 seconds
 
-> The whole project is about that gap between what the middleware reports and
-> what the application can safely believe. DDS tells you what happened to
-> communication. It cannot tell you whether the state is still safe to use —
-> that needs application invariants on top, and this repository is the evidence
-> that those invariants catch things the middleware does not.
+> The project is about the gap between what middleware reports and what an
+> application can safely believe. DDS gives strong communication contracts, but
+> application invariants still have to decide whether state is fresh, complete,
+> authorized and usable.
 >
-> It is honest about limits too. There is a list in the README of what is not
-> proven: no RTI Connext, no certification, no statistical tail claims, no
-> multi-writer fan-in.
+> The engineering roadmap is deliberately frozen now. The repository already
+> demonstrates live RTPS, QoS failure semantics, security, authority/failover,
+> bounded resources and fan-out isolation. The next work is evidence conversion:
+> this demo, interview material and role-specific proof — not adding features for
+> their own sake.
 
 ---
 
@@ -155,19 +139,31 @@ freshness budget.
 
 **"Why DDS rather than Kafka?"** Kafka is a durable ordered log for asynchronous
 replay. DDS is data-centric pub/sub for real-time distribution with endpoint QoS
-contracts — deadline, liveliness, durability, ownership. This project uses those
-semantics rather than treating DDS as a message bus.
+contracts such as deadline, liveliness, durability, ownership and resource
+limits. This project uses those semantics rather than treating DDS as a generic
+message bus.
 
-**"Have you used RTI Connext?"** No, and the README says so. Vendor code sits
-behind a pimpl seam so no other translation unit includes a Fast DDS header; a
-Connext backend is a second `.cpp` implementing the same two classes.
+**"Have you used RTI Connext?"** No. The implementation is Fast DDS 2.14.6 and the
+README says so. Vendor headers are isolated behind a pimpl seam so a Connext
+backend can be added if a programme requires it without rewriting the
+application-level trustworthiness layer.
 
-**"What was hardest?"** Not the DDS API — making the tests mean anything. Two
-assertions in this repo passed on noise until I mutation-tested them: a
-blocking-time floor of 1 ms when ordinary write latency is 1.2 ms, and a hot-key
-check satisfied by a single sample of round-robin ordering. Both looked correct
-on the page. Now every guard is watched failing before it is trusted.
+**"What was hardest?"** Making the tests prove the thing they claimed to prove.
+Several controls were wrong in ways code review did not reveal: a blocking floor
+that passed on ordinary scheduling latency, a hot-key ratio that passed on one
+round-robin sample, and a fan-out fault control that inferred `SIGSTOP` from
+sample counts even though a resumed TRANSIENT_LOCAL reader could drain retained
+history and finish ahead of readers that never stalled. The corrected control
+checks `/proc/<pid>/stat` for process state `T` directly.
 
-**"What would you do next?"** Fan-out combined with network impairment, reader-side
-resource measurement, and a soak run. Then an RTI Connext adapter to prove the
-seam is real.
+The merge gate had the same class of defect. It once looked at PR checks spanning
+multiple commits, so stale results could influence a new head. It now resolves
+the exact head SHA, considers only runs for that SHA, and fails closed when no
+matching runs exist. A confident check against the wrong state is still a false
+control.
+
+**"What would you do next?"** For this portfolio repository, stop expanding it.
+I would add RTI Connext only if a role or programme makes interoperability a real
+requirement. Otherwise the highest-value next step is applying the proven work:
+record the demo, use the evidence in interviews, and let real engineering needs
+determine the next experiment.
