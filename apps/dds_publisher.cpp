@@ -8,6 +8,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <vector>
 
 using namespace resilientdds;
 
@@ -32,6 +33,11 @@ struct Options {
     int history_keep_all{-1};
     int max_samples{-1};
     int max_blocking_ms{-1};
+    // Milestone 4C fan-out. keys>1 publishes round-robin across key-0..key-N-1.
+    std::uint32_t keys{1};
+    int hot_key{-1};
+    std::uint32_t hot_multiplier{1};
+    int max_instances{-1};
     bool allow_shm{false};
 };
 
@@ -67,11 +73,17 @@ int main(int argc, char** argv) {
         else if (k == "--history") o.history_keep_all = (std::string(v) == "keep_all") ? 1 : 0;
         else if (k == "--max-samples") o.max_samples = std::atoi(v);
         else if (k == "--max-blocking-ms") o.max_blocking_ms = std::atoi(v);
+        else if (k == "--keys") o.keys = static_cast<std::uint32_t>(u64(v));
+        else if (k == "--hot-key") o.hot_key = std::atoi(v);
+        else if (k == "--hot-multiplier") o.hot_multiplier = static_cast<std::uint32_t>(u64(v));
+        else if (k == "--max-instances") o.max_instances = std::atoi(v);
     }
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--allow-shm") o.allow_shm = true;
     }
     if (o.rate_hz == 0) o.rate_hz = 1;
+    if (o.keys == 0) o.keys = 1;
+    if (o.hot_multiplier == 0) o.hot_multiplier = 1;
 
     MetricsRegistry metrics;
     TelemetryPublisher publisher(metrics);
@@ -81,6 +93,7 @@ int main(int argc, char** argv) {
     }
     if (o.max_samples >= 0) profile.max_samples = static_cast<std::uint32_t>(o.max_samples);
     if (o.max_blocking_ms >= 0) profile.max_blocking_ms = static_cast<std::uint32_t>(o.max_blocking_ms);
+    if (o.max_instances >= 0) profile.max_instances = static_cast<std::uint32_t>(o.max_instances);
     std::cout << "WRITER_QOS history=" << (profile.history == History::keep_all ? "keep_all" : "keep_last")
               << " depth=" << profile.history_depth
               << " max_samples=" << profile.max_samples
@@ -106,19 +119,36 @@ int main(int argc, char** argv) {
     }
 
     const auto period = std::chrono::milliseconds(1000 / o.rate_hz);
-    for (std::uint64_t seq = 1; seq <= o.count; ++seq) {
-        if (seq == o.drop_at) {
+    // Per-key sequence numbers. A single counter shared across keys would make
+    // every key look permanently gap-ridden, and the gap detector would be
+    // measuring this loop rather than DDS.
+    std::vector<std::uint64_t> key_seq(o.keys, 0);
+    if (o.keys > 1) {
+        std::cout << "KEYS n=" << o.keys << " hot=" << o.hot_key
+                  << " hot_multiplier=" << o.hot_multiplier << "\n" << std::flush;
+    }
+
+    for (std::uint64_t round = 1; round <= o.count; ++round) {
+        const std::uint32_t key_index = static_cast<std::uint32_t>((round - 1) % o.keys);
+        // The hot key is published extra times per round; the others keep their
+        // nominal rate, so "hot" means one noisy instance rather than a faster
+        // stream overall.
+        const std::uint32_t repeats =
+            (o.hot_key >= 0 && key_index == static_cast<std::uint32_t>(o.hot_key)) ? o.hot_multiplier : 1;
+        const std::uint64_t seq = ++key_seq[key_index];
+
+        if (round == o.drop_at) {
             std::cout << "INJECT drop seq=" << seq << "\n" << std::flush;
             std::this_thread::sleep_for(period);
             continue;
         }
-        if (o.stall_at > 0 && seq == o.count / 2) {
+        if (o.stall_at > 0 && round == o.count / 2) {
             std::cout << "INJECT stall ms=" << o.stall_at << "\n" << std::flush;
             std::this_thread::sleep_for(std::chrono::milliseconds(o.stall_at));
         }
 
         TelemetrySample s;
-        s.source_id = o.source_id;
+        s.source_id = (o.keys > 1) ? ("key-" + std::to_string(key_index)) : o.source_id;
         s.sequence = seq;
         s.source_timestamp_ns = now_ns();
         s.ingest_timestamp_ns = s.source_timestamp_ns;
@@ -126,19 +156,25 @@ int main(int argc, char** argv) {
         s.voltage_v = 27.5;
         s.schema_version = kCurrentSchemaVersion;
 
-        if (seq == o.stale_at) {
+        if (round == o.stale_at) {
             s.source_timestamp_ns -= 2'000'000'000;
             std::cout << "INJECT stale seq=" << seq << "\n" << std::flush;
         }
-        if (seq == o.schema_drift_at) {
+        if (round == o.schema_drift_at) {
             s.schema_version = kCurrentSchemaVersion + 1;
             std::cout << "INJECT schema_drift seq=" << seq << "\n" << std::flush;
         }
 
         publisher.publish(s);
+        for (std::uint32_t extra = 1; extra < repeats; ++extra) {
+            s.sequence = ++key_seq[key_index];
+            s.source_timestamp_ns = now_ns();
+            s.ingest_timestamp_ns = s.source_timestamp_ns;
+            publisher.publish(s);
+        }
         if (profile.liveliness == Liveliness::manual_by_topic) publisher.assert_liveliness();
 
-        if (seq == o.duplicate_at) {
+        if (round == o.duplicate_at) {
             std::cout << "INJECT duplicate seq=" << seq << "\n" << std::flush;
             publisher.publish(s);
         }

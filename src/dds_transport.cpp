@@ -53,14 +53,33 @@ void apply_profile(QosT& qos, const QosProfile& profile) {
     qos.history().kind = profile.history == History::keep_all ? ddsapi::KEEP_ALL_HISTORY_QOS
                                                               : ddsapi::KEEP_LAST_HISTORY_QOS;
     qos.history().depth = static_cast<std::int32_t>(profile.history_depth);
+    // Fast DDS defaults max_instances to 10. Beyond that, additional keyed
+    // instances are silently dropped, so raising it is not tuning -- it is the
+    // difference between a key existing and not.
+    const std::int32_t instances =
+        profile.max_instances > 0 ? static_cast<std::int32_t>(profile.max_instances) : 0;
+    if (instances > 0) {
+        qos.resource_limits().max_instances = instances;
+        if (profile.max_samples == 0) {
+            // Raising instances alone violates Fast DDS's consistency rule
+            // (defaults are max_samples 5000, max_samples_per_instance 400, so
+            // 64 instances would need 25600) and the endpoint is rejected. Size
+            // the pool from what KEEP_LAST actually needs: depth per instance.
+            const auto per_instance = static_cast<std::int32_t>(profile.history_depth);
+            qos.resource_limits().max_samples_per_instance = per_instance;
+            qos.resource_limits().max_samples = instances * per_instance;
+        }
+    }
+
     if (profile.max_samples > 0) {
         // Fast DDS enforces max_samples >= max_instances * max_samples_per_instance
-        // and rejects the writer otherwise. Bounding the per-instance limit
-        // without also bounding instances fails that check, so pin instances to
-        // the single keyed source this lab publishes.
+        // and rejects the endpoint otherwise, so the per-instance share has to be
+        // derived from the two rather than set to the global ceiling.
+        const std::int32_t n = instances > 0 ? instances : 1;
+        const auto per_instance = static_cast<std::int32_t>(profile.max_samples) / n;
         qos.resource_limits().max_samples = static_cast<std::int32_t>(profile.max_samples);
-        qos.resource_limits().max_instances = 1;
-        qos.resource_limits().max_samples_per_instance = static_cast<std::int32_t>(profile.max_samples);
+        if (instances == 0) qos.resource_limits().max_instances = 1;
+        qos.resource_limits().max_samples_per_instance = per_instance > 0 ? per_instance : 1;
     }
     if (profile.deadline_ms > 0) {
         qos.deadline().period = ms_to_duration(profile.deadline_ms);
@@ -336,6 +355,11 @@ struct TelemetrySubscriber::Impl : public ddsapi::DataReaderListener {
                 }
             }
             metrics.increment("rdtf_samples_received_total");
+            // Per-key counters. Isolation is a per-instance property, so a
+            // single global total cannot show whether one hot or starved key
+            // affected the others. Prometheus label syntax is emitted verbatim
+            // by the renderer.
+            metrics.increment("rdtf_samples_received_by_key{key=\"" + sample.source_id + "\"}");
             health.on_sample(sample.source_id, observed,
                              (observed - sample.source_timestamp_ns) / 1'000'000);
 
@@ -345,6 +369,8 @@ struct TelemetrySubscriber::Impl : public ddsapi::DataReaderListener {
 
             for (const auto& event : detector.evaluate(sample, observed)) {
                 metrics.increment(std::string("rdtf_anomaly_") + to_string(event.kind) + "_total");
+                metrics.increment(std::string("rdtf_anomaly_by_key{kind=\"") + to_string(event.kind) +
+                                  "\",key=\"" + event.source_id + "\"}");
                 if (audit != nullptr) audit->write(event, observed);
                 std::cout << "ANOMALY source=" << event.source_id
                           << " seq=" << event.sequence

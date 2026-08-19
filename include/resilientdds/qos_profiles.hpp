@@ -31,6 +31,10 @@ struct QosProfile {
     // How long a RELIABLE write() may block once history is full before giving
     // up. 0 means fail immediately rather than wait.
     std::uint32_t max_blocking_ms{100};
+    // Maximum distinct keyed instances. 0 leaves the Fast DDS default, which is
+    // TEN -- publish an eleventh key and it is silently never delivered, with
+    // no error and no anomaly. Any topic with more keys than that must set this.
+    std::uint32_t max_instances{0};
 };
 
 QosProfile critical_control();
