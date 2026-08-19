@@ -21,6 +21,18 @@ mkdir -p "$OUT"
 
 [[ -x "$PUB" && -x "$SUB" ]] || { echo "binaries missing under $BUILD" >&2; exit 2; }
 
+# The executable bit is not the same as "can run". These link against Fast DDS,
+# so outside the container the loader cannot satisfy them and every process
+# exits instantly -- which this harness would otherwise report as a writer that
+# simply chose not to write.
+for bin in "$PUB" "$SUB"; do
+    if ldd "$bin" 2>/dev/null | grep -q "not found"; then
+        echo "ABORT: $bin cannot load its shared libraries:" >&2
+        ldd "$bin" 2>/dev/null | grep "not found" | sed 's/^/    /' >&2
+        exit 2
+    fi
+done
+
 pass=0; fail=0
 domain=200
 metric() { awk -v m="$2" '$1 == m { print $2; exit }' "$1" 2>/dev/null; }
