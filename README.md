@@ -1,41 +1,94 @@
 # Resilient DDS Data Plane
 
-A C++17 engineering lab for **reliable, diagnosable and policy-controlled real-time data distribution** in distributed and safety-conscious systems.
+**C++17 · DDS/RTPS · Fast DDS 2.14.6 · QoS contracts · distributed systems**
 
-This is deliberately not a hello-world publisher/subscriber. It focuses on the operational failures that make real DDS systems difficult to trust:
+A reliability lab that answers one question with measurements rather than
+assertions:
 
-- stale data that still arrives successfully;
-- missed publication/receive deadlines;
-- silent or failed writers;
-- duplicate, missing and out-of-order samples;
-- late-joining consumers that need recent state;
-- QoS incompatibility;
-- schema drift across independently deployed components;
-- packet loss, jitter, reordering and partitions;
-- slow consumers that turn healthy transport into unsafe state;
-- competing writers and primary/standby authority failover;
-- bounded writer pools and reliable-history backpressure;
-- untrusted or unauthorized participants;
-- weak observability when middleware says communication is "up" but application data is unhealthy.
+> **When the network, producer, authority, identity, schema, timing or resource
+> assumptions start to fail, how do you know the distributed state you are
+> holding is still safe to act on?**
 
-## Problem statement
+Every number below is produced by a script in this repository and reproduced by
+CI on every push.
 
-In a complex distributed system, **message delivery is not the same thing as trustworthy state**.
+## Three results worth your attention
 
-A consumer needs to know not only whether it received a sample, but whether the sample is:
+**1. A keyed topic silently loses two thirds of its state.** Fast DDS defaults
+`ResourceLimitsQosPolicy.max_instances` to **10**. Publish 32 keys and twenty-two
+of them are never delivered — no error, no `on_sample_lost`, no anomaly. Every
+diagnostic in this project stays green while a third of the state does not exist.
 
-1. fresh enough to act on;
-2. the expected next version in a sequence;
-3. compatible with the expected schema;
-4. arriving inside its operational deadline;
-5. coming from a writer that is still alive;
-6. recoverable when the consumer joins late;
-7. produced by the correct active authority when multiple writers exist;
-8. produced without silently overrunning bounded writer resources;
-9. produced by an authenticated and authorized participant;
-10. observable when any of those assumptions fail.
+```text
+default max_instances   ->  10 / 32 keys
+max_instances = 64      ->  32 / 32 keys
+```
 
-This project provides that layer around DDS.
+**2. Packet loss does not become gaps. It becomes latency.** The same 15% loss,
+two QoS contracts:
+
+```text
+RELIABLE      gaps=0    stale=59   p50=174 ms
+BEST_EFFORT   gaps=32   stale=0    p50=205 us
+```
+
+Reliable recovered every sample and spent the entire freshness budget doing it.
+Neither contract is "safer" — the question is whether this consumer would rather
+have old data or missing data, and only the application knows.
+
+**3. The consumer is unsafe long before DDS says anything.** Across a partition,
+the freshness budget broke at **+262 ms** and DDS declared the writer lost at
+**+1005 ms** — a 743 ms window in which the middleware was content and the state
+was already unusable. For a 20 ms control loop that is ~37 cycles of acting on
+state nothing had flagged.
+
+The thesis in one line:
+
+```text
+MESSAGE DELIVERED  ≠  STATE SAFE TO USE
+write() RETURNED TRUE  ≠  THE SAMPLE WILL ARRIVE
+```
+
+## See it yourself in 60 seconds
+
+```bash
+docker build -t rdtf-fastdds:2.14.6 -f docker/Dockerfile .
+docker run --rm --cap-add=NET_ADMIN -v "$PWD":/work rdtf-fastdds:2.14.6 bash -c \
+  'cmake -S . -B build-dds -DRDTF_ENABLE_FASTDDS=ON -DCMAKE_BUILD_TYPE=Release >/dev/null &&
+   cmake --build build-dds -j >/dev/null && BUILD=build-dds ./scripts/demo.sh'
+```
+
+Four live acts, real processes, ~60 s. `PAUSE=1` waits between them for
+presenting. Narration, timings and expected questions: [docs/DEMO.md](docs/DEMO.md).
+
+## Evidence index
+
+| area | proven | where |
+|---|---|---|
+| RTPS failure semantics | 10 scenarios: gap, duplicate, stale, schema drift, deadline, liveliness, late-joiner, QoS mismatch | [VALIDATION_EVIDENCE.md](docs/VALIDATION_EVIDENCE.md) |
+| Network degradation | 6 impairments × 2 QoS contracts, partition/recovery timing, time-to-unsafe | [NETWORK_DEGRADATION.md](docs/NETWORK_DEGRADATION.md) |
+| DDS Security | PKI-DH auth, signed governance, rogue/unauthorized/insecure denial, paired plaintext-vs-encrypted capture | [DDS_SECURITY.md](docs/DDS_SECURITY.md) |
+| Multi-writer authority | EXCLUSIVE ownership, SIGKILL failover in 86 ms, first standby sample fresh | [ROADMAP.md](docs/ROADMAP.md) |
+| Writer resource bounds | `OUT_OF_RESOURCES` (8 µs) vs `TIMEOUT` (50 ms) separated; KEEP_LAST silent loss vs KEEP_ALL backpressure | [BOUNDED_RESOURCES.md](docs/BOUNDED_RESOURCES.md) |
+| Fan-out isolation | 8 readers 0 gaps; frozen reader does not couple; hot key does not starve neighbours; instance cap | [FANOUT_ISOLATION.md](docs/FANOUT_ISOLATION.md) |
+
+## How the evidence is kept honest
+
+Green tests are cheap. These are the habits that make the numbers mean
+something, and each one has caught a real defect in this repository:
+
+- **Every suite has a positive control.** A baseline that asserts a *minimum*
+  sample count, so "zero anomalies" cannot come from a run that moved no data.
+- **Every suite has a negative control.** `DEADLINE_MISSED`, `LIVELINESS_LOST`
+  and `INCOMPATIBLE_QOS` must be *absent* on a healthy stream, or matching them
+  under fault proves nothing.
+- **Guards are mutation-tested.** Each assertion is watched failing with its
+  mechanism disabled before it is trusted. Two thresholds in this project passed
+  on noise until that was done — a 1 ms blocking floor against ~1.2 ms of
+  ordinary write latency, and a hot-key test satisfied by one sample of
+  round-robin ordering. Neither was visible by reading the code.
+- **Absence is not proof.** A "the marker is not in the packet capture" claim
+  ships with a plaintext run proving the capture can see the marker at all.
 
 ## Architecture
 
@@ -280,8 +333,9 @@ Do not claim these:
 - resistance to arbitrary malformed/hostile RTPS traffic;
 - tamper-evident JSONL evidence;
 - statistical latency-tail claims — impairment cells are not yet repeated enough for that;
-- many-participant/CPU-contention latency;
-- multiple keyed-instance resource-limit behavior and many-reader writer pressure;
+- many-participant/CPU-contention latency beyond 8 readers and 32 instances;
+- fan-out combined with `tc netem` impairment;
+- reader-side RSS/CPU, and soak-duration churn rather than 5 cycles;
 - large-payload behavior and memory-allocation determinism;
 - split-brain authority behavior across a network partition or a production election/lease protocol;
 - production admission-control/backpressure policy;
