@@ -5,7 +5,6 @@
 
 #include <chrono>
 #include <cstdlib>
-#include <cstring>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -19,13 +18,15 @@ struct Options {
     std::string topic{"SystemTelemetry"};
     std::string profile{"periodic_telemetry"};
     std::string source_id{"radar-01"};
+    std::string security_dir;
+    std::string security_role{"publisher"};
     std::uint64_t count{50};
     std::uint32_t rate_hz{20};
-    std::uint64_t drop_at{0};        // skip this sequence -> reader sees a gap
-    std::uint64_t duplicate_at{0};   // re-send this sequence
-    std::uint64_t stale_at{0};       // backdate source_timestamp past the budget
-    std::uint64_t schema_drift_at{0};// publish an unexpected schema_version
-    std::uint32_t stall_at{0};       // sleep this many ms mid-stream -> deadline miss
+    std::uint64_t drop_at{0};
+    std::uint64_t duplicate_at{0};
+    std::uint64_t stale_at{0};
+    std::uint64_t schema_drift_at{0};
+    std::uint32_t stall_at{0};
     std::uint32_t wait_match_ms{3000};
     bool allow_shm{false};
 };
@@ -49,6 +50,8 @@ int main(int argc, char** argv) {
         else if (k == "--topic") o.topic = v;
         else if (k == "--profile") o.profile = v;
         else if (k == "--source-id") o.source_id = v;
+        else if (k == "--security-dir") o.security_dir = v;
+        else if (k == "--security-role") o.security_role = v;
         else if (k == "--count") o.count = u64(v);
         else if (k == "--rate-hz") o.rate_hz = static_cast<std::uint32_t>(u64(v));
         else if (k == "--drop-at") o.drop_at = u64(v);
@@ -66,17 +69,20 @@ int main(int argc, char** argv) {
     MetricsRegistry metrics;
     TelemetryPublisher publisher(metrics);
     const QosProfile profile = pick(o.profile);
+    const auto security = security_from_directory(o.security_dir, o.security_role);
 
     if (!publisher.start(o.domain, o.topic, profile,
-                         o.allow_shm ? TransportMode::defaults : TransportMode::udp_only)) {
+                         o.allow_shm ? TransportMode::defaults : TransportMode::udp_only,
+                         security.enabled ? &security : nullptr)) {
         std::cerr << "publisher failed to start\n";
         return 1;
     }
     std::cout << "PUBLISHER up domain=" << o.domain << " topic=" << o.topic
-              << " profile=" << profile.name << "\n" << std::flush;
+              << " profile=" << profile.name << " security="
+              << (security.enabled ? "on" : "off");
+    if (security.enabled) std::cout << " role=" << o.security_role;
+    std::cout << "\n" << std::flush;
 
-    // Transient-local replay is only meaningful if we can also publish before a
-    // reader exists, so matching is a timeout, not a precondition.
     for (std::uint32_t waited = 0; waited < o.wait_match_ms && !publisher.matched(); waited += 50) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
@@ -103,7 +109,7 @@ int main(int argc, char** argv) {
         s.schema_version = kCurrentSchemaVersion;
 
         if (seq == o.stale_at) {
-            s.source_timestamp_ns -= 2'000'000'000; // 2 s in the past
+            s.source_timestamp_ns -= 2'000'000'000;
             std::cout << "INJECT stale seq=" << seq << "\n" << std::flush;
         }
         if (seq == o.schema_drift_at) {

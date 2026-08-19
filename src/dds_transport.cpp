@@ -16,13 +16,14 @@
 #include <fastdds/rtps/transport/UDPv4TransportDescriptor.h>
 
 #include <algorithm>
-#include <cmath>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <filesystem>
 #include <iostream>
 #include <mutex>
-#include <thread>
 #include <numeric>
+#include <thread>
 #include <vector>
 
 namespace ddsapi = eprosima::fastdds::dds;
@@ -55,23 +56,86 @@ void apply_profile(QosT& qos, const QosProfile& profile) {
                                 : ddsapi::AUTOMATIC_LIVELINESS_QOS;
     if (profile.liveliness_lease_ms > 0) {
         qos.liveliness().lease_duration = ms_to_duration(profile.liveliness_lease_ms);
-        // Announcement must be strictly shorter than the lease or the writer
-        // times out its own liveliness under normal operation.
         qos.liveliness().announcement_period = ms_to_duration(profile.liveliness_lease_ms / 2);
     }
 }
 
-ddsapi::DomainParticipantQos participant_qos(TransportMode transport) {
+std::string file_uri(const std::string& value) {
+    if (value.rfind("file://", 0) == 0) return value;
+    return std::string("file://") + std::filesystem::absolute(value).string();
+}
+
+bool security_config_ok(const DdsSecurityConfig* security) {
+    if (security == nullptr || !security->enabled) return true;
+    if (!security->complete()) return false;
+    const std::string* paths[] = {
+        &security->identity_ca,
+        &security->identity_certificate,
+        &security->private_key,
+        &security->permissions_ca,
+        &security->governance,
+        &security->permissions,
+    };
+    for (const auto* path : paths) {
+        if (path->rfind("file://", 0) == 0) continue;
+        if (!std::filesystem::is_regular_file(*path)) return false;
+    }
+    return true;
+}
+
+void apply_security(ddsapi::DomainParticipantQos& qos, const DdsSecurityConfig& security) {
+    auto& props = qos.properties().properties();
+
+    props.emplace_back("dds.sec.auth.plugin", "builtin.PKI-DH");
+    props.emplace_back("dds.sec.auth.builtin.PKI-DH.identity_ca", file_uri(security.identity_ca));
+    props.emplace_back("dds.sec.auth.builtin.PKI-DH.identity_certificate",
+                       file_uri(security.identity_certificate));
+    props.emplace_back("dds.sec.auth.builtin.PKI-DH.private_key", file_uri(security.private_key));
+    props.emplace_back("dds.sec.auth.builtin.PKI-DH.preferred_key_agreement", "ECDH");
+
+    props.emplace_back("dds.sec.access.plugin", "builtin.Access-Permissions");
+    props.emplace_back("dds.sec.access.builtin.Access-Permissions.permissions_ca",
+                       file_uri(security.permissions_ca));
+    props.emplace_back("dds.sec.access.builtin.Access-Permissions.governance",
+                       file_uri(security.governance));
+    props.emplace_back("dds.sec.access.builtin.Access-Permissions.permissions",
+                       file_uri(security.permissions));
+
+    if (security.encryption) {
+        props.emplace_back("dds.sec.crypto.plugin", "builtin.AES-GCM-GMAC");
+    }
+}
+
+ddsapi::DomainParticipantQos participant_qos(TransportMode transport,
+                                              const DdsSecurityConfig* security) {
     auto qos = ddsapi::PARTICIPANT_QOS_DEFAULT;
     if (transport == TransportMode::udp_only) {
         qos.transport().use_builtin_transports = false;
         qos.transport().user_transports.push_back(
             std::make_shared<eprosima::fastdds::rtps::UDPv4TransportDescriptor>());
     }
+    if (security != nullptr && security->enabled) apply_security(qos, *security);
     return qos;
 }
 
 } // namespace
+
+DdsSecurityConfig security_from_directory(const std::string& root,
+                                          const std::string& role,
+                                          bool encryption) {
+    DdsSecurityConfig out;
+    if (root.empty()) return out;
+    const std::filesystem::path base(root);
+    out.enabled = true;
+    out.encryption = encryption;
+    out.identity_ca = (base / "identity_ca.pem").string();
+    out.identity_certificate = (base / (role + "-cert.pem")).string();
+    out.private_key = (base / (role + "-key.pem")).string();
+    out.permissions_ca = (base / "permissions_ca.pem").string();
+    out.governance = (base / "governance.smime").string();
+    out.permissions = (base / (role + "-permissions.smime")).string();
+    return out;
+}
 
 std::int64_t now_ns() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -121,17 +185,26 @@ TelemetryPublisher::~TelemetryPublisher() {
 }
 
 bool TelemetryPublisher::start(int domain_id, const std::string& topic_name,
-                               const QosProfile& profile, TransportMode transport) {
+                               const QosProfile& profile, TransportMode transport,
+                               const DdsSecurityConfig* security) {
     const auto errors = validate(profile);
     if (!errors.empty()) {
         for (const auto& e : errors) std::cerr << "QOS invalid: " << e << "\n";
         impl_->metrics.increment("rdtf_adapter_init_failures_total");
         return false;
     }
+    if (!security_config_ok(security)) {
+        std::cerr << "DDS security configuration is incomplete or references missing files\n";
+        impl_->metrics.increment("rdtf_security_config_failures_total");
+        return false;
+    }
 
     auto* factory = ddsapi::DomainParticipantFactory::get_instance();
-    impl_->participant = factory->create_participant(domain_id, participant_qos(transport));
-    if (impl_->participant == nullptr) return false;
+    impl_->participant = factory->create_participant(domain_id, participant_qos(transport, security));
+    if (impl_->participant == nullptr) {
+        impl_->metrics.increment("rdtf_adapter_init_failures_total");
+        return false;
+    }
 
     impl_->type.register_type(impl_->participant);
     impl_->topic = impl_->participant->create_topic(topic_name, impl_->type.get_type_name(),
@@ -147,6 +220,9 @@ bool TelemetryPublisher::start(int domain_id, const std::string& topic_name,
     if (impl_->writer == nullptr) return false;
 
     impl_->metrics.increment("rdtf_adapter_initializations_total");
+    if (security != nullptr && security->enabled) {
+        impl_->metrics.increment("rdtf_secure_participant_initializations_total");
+    }
     return true;
 }
 
@@ -182,7 +258,8 @@ struct TelemetrySubscriber::Impl : public ddsapi::DataReaderListener {
     void on_data_available(ddsapi::DataReader* reader) override {
         resilientdds::SystemTelemetry wire;
         ddsapi::SampleInfo info;
-        while (reader->take_next_sample(&wire, &info) == eprosima::fastrtps::types::ReturnCode_t::RETCODE_OK) {
+        while (reader->take_next_sample(&wire, &info) ==
+               eprosima::fastrtps::types::ReturnCode_t::RETCODE_OK) {
             if (!info.valid_data) continue;
 
             TelemetrySample sample;
@@ -198,8 +275,6 @@ struct TelemetrySubscriber::Impl : public ddsapi::DataReaderListener {
             source_hint = sample.source_id;
             if (!first_seen) {
                 first_seen = true;
-                // Direct evidence of transient-local replay: a late joiner whose
-                // first sample is not sequence 1 did not get history.
                 std::cout << "FIRST_SAMPLE seq=" << sample.sequence << " age_ms="
                           << (now_ns() - sample.source_timestamp_ns) / 1'000'000 << "\n"
                           << std::flush;
@@ -216,8 +291,6 @@ struct TelemetrySubscriber::Impl : public ddsapi::DataReaderListener {
                              (observed - sample.source_timestamp_ns) / 1'000'000);
 
             if (processing_delay_us > 0) {
-                // Deliberately blocking the listener thread, which is what a
-                // slow consumer really does to a DataReader.
                 std::this_thread::sleep_for(std::chrono::microseconds(processing_delay_us));
             }
 
@@ -268,15 +341,10 @@ struct TelemetrySubscriber::Impl : public ddsapi::DataReaderListener {
     void on_subscription_matched(ddsapi::DataReader*,
                                  const ddsapi::SubscriptionMatchedStatus& status) override {
         metrics.gauge("rdtf_subscription_matched", static_cast<double>(status.current_count));
-        // A writer that exits cleanly never expires its lease. Without this the
-        // orderly shutdown is invisible and only crashes are detectable.
         health.on_writer_matched(last_source(), status.current_count > 0);
         std::cout << "MATCH writers=" << status.current_count << "\n" << std::flush;
     }
 
-    // ponytail: single-writer lab. Status callbacks carry no instance handle we
-    // resolve to a source_id, so health events attach to the configured source.
-    // Multi-source needs reader->get_key_value(handle) here.
     const std::string& last_source() const { return source_hint; }
 
     static constexpr std::size_t kLatencyCap = 1'000'000;
@@ -318,17 +386,26 @@ TelemetrySubscriber::~TelemetrySubscriber() {
 }
 
 bool TelemetrySubscriber::start(int domain_id, const std::string& topic_name,
-                                const QosProfile& profile, TransportMode transport) {
+                                const QosProfile& profile, TransportMode transport,
+                                const DdsSecurityConfig* security) {
     const auto errors = validate(profile);
     if (!errors.empty()) {
         for (const auto& e : errors) std::cerr << "QOS invalid: " << e << "\n";
         impl_->metrics.increment("rdtf_adapter_init_failures_total");
         return false;
     }
+    if (!security_config_ok(security)) {
+        std::cerr << "DDS security configuration is incomplete or references missing files\n";
+        impl_->metrics.increment("rdtf_security_config_failures_total");
+        return false;
+    }
 
     auto* factory = ddsapi::DomainParticipantFactory::get_instance();
-    impl_->participant = factory->create_participant(domain_id, participant_qos(transport));
-    if (impl_->participant == nullptr) return false;
+    impl_->participant = factory->create_participant(domain_id, participant_qos(transport, security));
+    if (impl_->participant == nullptr) {
+        impl_->metrics.increment("rdtf_adapter_init_failures_total");
+        return false;
+    }
 
     impl_->type.register_type(impl_->participant);
     impl_->topic = impl_->participant->create_topic(topic_name, impl_->type.get_type_name(),
@@ -344,19 +421,19 @@ bool TelemetrySubscriber::start(int domain_id, const std::string& topic_name,
     if (impl_->reader == nullptr) return false;
 
     impl_->metrics.increment("rdtf_adapter_initializations_total");
+    if (security != nullptr && security->enabled) {
+        impl_->metrics.increment("rdtf_secure_participant_initializations_total");
+    }
     return true;
 }
 
 TelemetrySubscriber::Latency TelemetrySubscriber::latency() const {
     std::lock_guard<std::mutex> lock(impl_->latency_mutex);
     Latency out;
-    auto samples = impl_->latency_us;   // copy: sorting the live buffer would race the reader thread
+    auto samples = impl_->latency_us;
     if (samples.empty()) return out;
     std::sort(samples.begin(), samples.end());
 
-    // Nearest-rank. With fewer samples than the percentile resolution this
-    // collapses to the max, which is the honest answer rather than an
-    // interpolated one that implies precision the run does not have.
     const auto pct = [&samples](double p) {
         const auto n = static_cast<double>(samples.size());
         auto rank = static_cast<std::size_t>(std::ceil(p * n / 100.0));
@@ -371,7 +448,8 @@ TelemetrySubscriber::Latency TelemetrySubscriber::latency() const {
     out.p95_us = pct(95.0);
     out.p99_us = pct(99.0);
     out.p999_us = pct(99.9);
-    const double sum = static_cast<double>(std::accumulate(samples.begin(), samples.end(), std::int64_t{0}));
+    const double sum = static_cast<double>(
+        std::accumulate(samples.begin(), samples.end(), std::int64_t{0}));
     out.mean_us = sum / static_cast<double>(samples.size());
     double sq = 0.0;
     for (const auto v : samples) {

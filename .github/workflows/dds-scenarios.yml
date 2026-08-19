@@ -1,4 +1,4 @@
-name: DDS failure scenarios
+name: DDS failure and security scenarios
 
 on: [push, pull_request]
 
@@ -7,22 +7,36 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install Fast DDS
+      - uses: docker/setup-buildx-action@v3
+      - name: Build pinned Fast DDS 2.14.6 security image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          load: true
+          tags: rdtf-fastdds:2.14.6
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build and validate RTPS, netem and DDS Security
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake build-essential default-jre-headless fastddsgen libfastrtps-dev
-      - name: Build
-        run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DRDTF_ENABLE_FASTDDS=ON
-          cmake --build build -j"$(nproc)"
-      - name: Core unit tests
-        run: ctest --test-dir build --output-on-failure
-      - name: Failure-injection scenarios over RTPS
-        run: BUILD=build OUT=evidence ./scripts/run_scenarios.sh
-      - name: Network degradation matrix
-        # GitHub runners allow tc on loopback; NET_ADMIN is available to the job.
-        run: DURATION=6 BUILD=build OUT=evidence sudo -E ./scripts/run_netem.sh
+          docker run --rm \
+            --network host \
+            --cap-add=NET_ADMIN \
+            --cap-add=NET_RAW \
+            -v "$PWD:/work" \
+            rdtf-fastdds:2.14.6 \
+            bash -lc '
+              set -euo pipefail
+              fastddsgen -version || true
+              cmake -S . -B build-dds -DCMAKE_BUILD_TYPE=Release -DRDTF_ENABLE_FASTDDS=ON
+              cmake --build build-dds -j"$(nproc)"
+              ctest --test-dir build-dds --output-on-failure
+              BUILD=build-dds OUT=evidence ./scripts/run_scenarios.sh
+              DURATION=6 BUILD=build-dds OUT=evidence/netem ./scripts/run_netem.sh
+              ./scripts/security/generate_test_pki.sh /tmp/rdtf-security-pki
+              BUILD=build-dds PKI=/tmp/rdtf-security-pki OUT=evidence/security \
+                ./scripts/security/run_security_scenarios.sh
+            '
       - uses: actions/upload-artifact@v4
         if: always()
         with:

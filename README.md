@@ -1,6 +1,6 @@
 # Resilient DDS Data Plane
 
-A C++17 engineering lab for **reliable, diagnosable real-time data distribution** in distributed and safety-conscious systems.
+A C++17 engineering lab for **reliable, diagnosable and policy-controlled real-time data distribution** in distributed and safety-conscious systems.
 
 This is deliberately not a hello-world publisher/subscriber. It focuses on the operational failures that make real DDS systems difficult to trust:
 
@@ -11,6 +11,9 @@ This is deliberately not a hello-world publisher/subscriber. It focuses on the o
 - late-joining consumers that need recent state;
 - QoS incompatibility;
 - schema drift across independently deployed components;
+- packet loss, jitter, reordering and partitions;
+- slow consumers that turn healthy transport into unsafe state;
+- untrusted or unauthorized participants;
 - weak observability when middleware says communication is "up" but application data is unhealthy.
 
 ## Problem statement
@@ -25,7 +28,8 @@ A consumer needs to know not only whether it received a sample, but whether the 
 4. arriving inside its operational deadline;
 5. coming from a writer that is still alive;
 6. recoverable when the consumer joins late;
-7. observable when any of those assumptions fail.
+7. produced by an authenticated and authorized participant;
+8. observable when any of those assumptions fail.
 
 This project provides that layer around DDS.
 
@@ -42,6 +46,7 @@ Producer / sensor / subsystem
 | DDS DataWriter            |
 | reliability / durability  |
 | deadline / liveliness     |
+| auth / permissions        |
 +---------------------------+
           |
        DDS/RTPS
@@ -75,11 +80,16 @@ Producer / sensor / subsystem
 | Out-of-order state | Sequence regression detection |
 | Stale but valid-looking data | Source timestamp freshness budget |
 | Clock skew | Future-timestamp guard |
-| Writer stops publishing | Deadline and liveliness health transitions |
+| Writer stops publishing | Deadline, match and liveliness health transitions |
 | Consumer starts late | `TRANSIENT_LOCAL + RELIABLE` QoS profile |
 | High-rate expendable sensor stream | `BEST_EFFORT + VOLATILE` profile |
 | Schema drift | Explicit schema version + appendable IDL model |
 | QoS mismatch | Health path for incompatible QoS callback |
+| Network degradation | `tc netem` RELIABLE/BEST_EFFORT evidence matrix |
+| Slow reader | Processing-delay scenario + freshness/latency evidence |
+| Rogue participant | PKI-DH authentication negative test |
+| Wrongly privileged participant | Signed Access-Permissions negative test |
+| Plaintext application payload | AES-GCM-GMAC protected DDS path + paired pcap control |
 | Hard-to-debug incidents | Prometheus-style counters + JSONL anomaly evidence |
 | Vendor lock-in | DDS adapter boundary; core logic has no vendor dependency |
 
@@ -95,66 +105,82 @@ The point is to demonstrate that QoS is an application contract, not a tuning af
 
 ## Run it
 
-Everything builds and runs in a container. That is not a convenience: the
-failure modes under test are killed processes and network namespaces.
+Everything builds and runs in a container. That is not just convenience: the failure modes under test include killed processes, network namespaces, `tc netem` and packet capture.
+
+The scenario image pins **Fast DDS 2.14.6** and builds it with `SECURITY=ON`:
 
 ```bash
-docker build -t rdtf-build docker/
+docker build -t rdtf-build -f docker/Dockerfile .
 ```
 
-### The live DDS failure scenarios
+### Live DDS failure scenarios
 
-Ten scenarios, each two real processes exchanging real RTPS traffic:
+Ten scenarios, each using real processes exchanging RTPS traffic:
 
 ```bash
-docker run --rm -v "$PWD":/work rdtf-build bash -c \
+docker run --rm --network host -v "$PWD":/work rdtf-build bash -lc \
   'cmake -S /work -B /tmp/b -DRDTF_ENABLE_FASTDDS=ON -DCMAKE_BUILD_TYPE=Release && \
-   cmake --build /tmp/b -j && BUILD=/tmp/b bash /work/scripts/run_scenarios.sh'
+   cmake --build /tmp/b -j"$(nproc)" && BUILD=/tmp/b /work/scripts/run_scenarios.sh'
 ```
 
-```text
-PASS baseline           <- received=130 anomalies=0
-PASS negative_control   <- no deadline/liveliness/QoS events on the healthy stream
-PASS packet_gap         <- kind=sequence_gap missing=1
-PASS duplicate          <- kind=duplicate
-PASS stale_sample       <- kind=stale
-PASS schema_drift       <- kind=schema_mismatch
-PASS deadline_miss      <- DEADLINE_MISSED
-PASS late_joiner        <- first replayed seq=1, 25 replayed samples flagged stale
-PASS dead_writer        <- LIVELINESS_LOST alive=0
-PASS qos_mismatch       <- INCOMPATIBLE_QOS last_policy_id=11
-```
-
-Faults are injected by the publisher (`--drop-at`, `--duplicate-at`,
-`--stale-at`, `--schema-drift-at`, `--stall-at`) or by the harness killing it.
+The suite proves a healthy positive/negative control before accepting evidence for sequence gaps, duplicates, stale samples, schema drift, missed deadlines, late joining, hard writer death and incompatible QoS.
 
 ### Network degradation and recovery
 
-Six impairments x two QoS contracts, plus partition/recovery timing and a slow
-consumer. Needs `NET_ADMIN` for `tc netem`:
+Six impairments x two QoS contracts, plus partition/recovery timing and a slow consumer. Needs `NET_ADMIN` for `tc netem`:
 
 ```bash
-docker run --rm --cap-add=NET_ADMIN -v "$PWD":/work rdtf-build bash -c \
+docker run --rm --network host --cap-add=NET_ADMIN -v "$PWD":/work rdtf-build bash -lc \
   'cmake -S /work -B /tmp/b -DRDTF_ENABLE_FASTDDS=ON -DCMAKE_BUILD_TYPE=Release && \
-   cmake --build /tmp/b -j && BUILD=/tmp/b bash /work/scripts/run_netem.sh'
+   cmake --build /tmp/b -j"$(nproc)" && BUILD=/tmp/b /work/scripts/run_netem.sh'
 ```
 
 Full results and analysis: [docs/NETWORK_DEGRADATION.md](docs/NETWORK_DEGRADATION.md).
-The headline is that under 15% packet loss the RELIABLE reader saw **0 gaps and
-82 stale samples** while the BEST_EFFORT reader saw **31 gaps and 0 stale
-samples** — loss becomes latency, not gaps, and the right contract depends
-entirely on whether the consumer can tolerate old data or missing data.
+The important result is qualitative, not a single benchmark number: with RELIABLE QoS, transport loss can become **retransmission latency and stale state**; with BEST_EFFORT it is more likely to become **visible application gaps**. The right contract depends on what the consumer is allowed to tolerate.
 
-### Across a real network
+### DDS Security validation
 
-One container uses Fast DDS's shared-memory transport and never touches UDP, so
-the two endpoints run in separate containers on a bridge network:
+Generate disposable test credentials and run the six-case security matrix:
+
+```bash
+./scripts/security/generate_test_pki.sh /tmp/rdtf-security-pki
+BUILD=/tmp/b PKI=/tmp/rdtf-security-pki OUT=/tmp/security-evidence \
+  ./scripts/security/run_security_scenarios.sh
+```
+
+GitHub Actions run `32178914685` on commit `c2b0c2e` produced **6/6 PASS**:
+
+```text
+PASS secure_baseline
+PASS untrusted_identity
+PASS unauthorized_writer
+PASS insecure_peer
+PASS plaintext_capture_control
+PASS encrypted_payload_capture
+```
+
+Observed controls:
+
+- trusted/authorized secure path: **300 samples received**;
+- trusted identity without publish permission: writer creation rejected;
+- rogue identity CA: **0 application samples**;
+- insecure peer against secure governance: **0 application samples**;
+- plaintext pcap: unique application marker visible **300 times**;
+- encrypted pcap: the same application marker visible **0 times** while all 300 secure samples were received.
+
+The last point is deliberately narrow: it proves the application marker is not present in plaintext in the captured secure DDS traffic. It does **not** mean every security-handshake field is opaque; certificate/CA strings can still be observable during authentication.
+
+More detail: [docs/DDS_SECURITY.md](docs/DDS_SECURITY.md).
+
+### Across a real network namespace boundary
+
+Publisher and subscriber run in separate containers on a bridge network. The applications default to UDP-only transport, so shared memory cannot silently bypass the network path:
 
 ```bash
 docker compose -f docker/docker-compose.yml up --abort-on-container-exit
 ```
 
-### The dependency-free core alone
+### Dependency-free core alone
 
 ```bash
 ./scripts/build_core.sh && ./build/resilientdds_simulator
@@ -162,53 +188,50 @@ docker compose -f docker/docker-compose.yml up --abort-on-container-exit
 
 ## DDS integration boundary
 
-Fast DDS types live behind a pimpl in `src/dds_transport.cpp`. No other
-translation unit — not the detector, not the health monitor, not the tests, not
-the apps — includes a vendor header. An RTI Connext backend is a second `.cpp`
-implementing the same two classes, not a rewrite.
+Fast DDS types live behind a pimpl in `src/dds_transport.cpp`. No other translation unit — not the detector, not the health monitor, not the tests, not the apps — needs Fast DDS headers. An RTI Connext backend is intended to implement the same application-facing seam rather than force a rewrite of the trustworthiness layer.
 
-Type support is generated from `idl/SystemTelemetry.idl` at build time by
-Fast DDS-Gen. Generated code is not checked in, so the wire format cannot drift
-from the model.
+Type support is generated from `idl/SystemTelemetry.idl` at build time by Fast DDS-Gen. Generated code is not checked in, so the wire model is derived from the IDL source of truth.
 
-## What is actually built, and what is not
+## What is actually built and verified
 
-Built and verified — see [docs/VALIDATION_EVIDENCE.md](docs/VALIDATION_EVIDENCE.md)
-for the commands and their output:
+See [docs/VALIDATION_EVIDENCE.md](docs/VALIDATION_EVIDENCE.md) for the evidence boundary.
 
-- live Fast DDS publisher and subscriber, IDL-generated types, RTPS discovery;
+- live Fast DDS publisher and subscriber with IDL-generated types and RTPS discovery;
+- Fast DDS **2.14.6** regression/security image built from source with `SECURITY=ON`;
 - QoS mapped from three named profiles onto real writer/reader QoS;
-- reader callbacks wired into health: requested deadline missed, liveliness
-  changed, requested incompatible QoS, sample lost, subscription matched;
-- sequence-gap, duplicate, out-of-order, stale, clock-skew and schema-drift
-  detection against real received samples;
-- transient-local late-joiner replay, and the freshness verdict on replayed data;
-- UDP-only transport by default, so `tc netem` impairments cannot be bypassed
-  via shared memory;
-- health state separated from health reason, with hysteresis in both directions;
-- six `tc netem` impairments against both a reliable and a best-effort contract;
-- partition/recovery timings, including a measured 743 ms window in which the
-  consumer's state was unusable before DDS reported the writer lost;
-- a slow-consumer scenario: healthy network, p99 latency over 1 s;
-- measured end-to-end latency with p50/p95/p99/p99.9/max/stddev.
+- reader callbacks wired into health: deadline, liveliness, incompatible QoS, sample loss and matching;
+- sequence-gap, duplicate, out-of-order, stale, clock-skew and schema-drift detection against received samples;
+- transient-local late-joiner replay, including freshness verdicts on replayed history;
+- UDP-only transport by default for impairment tests;
+- health state separated from health reason, with hysteresis;
+- six `tc netem` impairments against RELIABLE and BEST_EFFORT contracts;
+- partition/recovery timing and time-to-unsafe-state measurement;
+- slow-consumer scenario showing that healthy networking does not imply healthy application state;
+- latency percentiles p50/p95/p99/p99.9/max/stddev;
+- DDS Security PKI-DH authentication, signed governance/permissions and AES-GCM-GMAC configuration;
+- negative security tests for rogue identity, unauthorized writer and insecure peer;
+- paired plaintext/encrypted packet-capture controls.
 
-Not built, not claimed:
+## Still not built or not proven
 
-- **DDS Security** — no authentication, access control or encryption;
-- **RTI Connext** — no adapter, no licence, nothing attempted;
-- **Fast DDS 3.x** — the code targets the 2.11 API shipped by Ubuntu 24.04;
-- repeated statistical runs (one run per impairment cell so far);
-- multi-publisher, multi-instance and large-payload behaviour;
-- sanitizer coverage of the DDS transport (unit-test path only);
-- adversarial or malformed payload handling.
+Do not claim these:
 
-The gap list is part of the deliverable. A portfolio project that cannot say
-what it has not proven is not evidence of anything.
+- **RTI Connext** — no adapter, SDK validation or interoperability run yet;
+- **Fast DDS 3.x** compatibility — the supported regression/security baseline is 2.14.6;
+- production certificate rotation, revocation, HSM-backed keys or zero-downtime credential rollover;
+- security or safety certification;
+- resistance to arbitrary malformed/hostile RTPS traffic;
+- tamper-evident JSONL evidence;
+- statistical latency-tail claims — impairment cells are not yet repeated enough for that;
+- many-participant/CPU-contention latency;
+- bounded resource-limit and writer-history-exhaustion behavior;
+- large payloads and multi-writer authority/failover;
+- sanitizer coverage of the live DDS transport path.
 
-## Why this is stronger than a portfolio toy
+The gap list is part of the deliverable. A portfolio project that cannot say what it has not proven is not evidence of anything.
 
-The project answers a systems-engineering question:
+## Engineering thesis
 
-> **How do you know distributed state is still safe to act on when the network, producer, schema or timing assumptions begin to fail?**
+> **How do you know distributed state is still safe to act on when the network, producer, identity, permissions, schema, timing or resource assumptions begin to fail?**
 
-That is the real problem this lab is designed to make visible.
+That is the systems problem this lab is designed to make visible.
