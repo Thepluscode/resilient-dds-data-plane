@@ -108,6 +108,26 @@ int main() {
         auto broken = critical_control();
         broken.reliability = Reliability::best_effort;
         check(!validate(broken).empty(), "unsafe transient-local/best-effort combination rejected");
+
+        // Milestone 4B. KEEP_ALL retains until acknowledged, so a reader that
+        // stops draining grows writer memory with no ceiling. That failure mode
+        // is an OOM kill, not a QoS event, so it must be refused up front.
+        auto unbounded = periodic_telemetry();
+        unbounded.history = History::keep_all;
+        unbounded.max_samples = 0;
+        check(!validate(unbounded).empty(), "keep-all reliable with unlimited samples rejected");
+
+        auto bounded = unbounded;
+        bounded.max_samples = 64;
+        check(validate(bounded).empty(), "keep-all reliable with a sample ceiling accepted");
+
+        // Best-effort never retains for acknowledgement, so the ceiling is not
+        // required there; without this the rule could be over-broad and nobody
+        // would notice.
+        auto best_effort_keep_all = high_rate_sensor();
+        best_effort_keep_all.history = History::keep_all;
+        best_effort_keep_all.max_samples = 0;
+        check(validate(best_effort_keep_all).empty(), "keep-all best-effort does not require a ceiling");
     }
 
     {

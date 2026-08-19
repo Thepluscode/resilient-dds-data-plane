@@ -38,6 +38,7 @@ jobs:
                 ./scripts/security/run_security_scenarios.sh
               BUILD=build-dds OUT=evidence/authority ./scripts/run_authority_scenarios.sh
               BUILD=build-dds OUT=evidence/resource-bounds ./scripts/run_resource_bounds.sh
+              BUILD=build-dds OUT=evidence/backpressure ./scripts/run_backpressure_scenarios.sh
             '
       - uses: actions/upload-artifact@v4
         if: always()

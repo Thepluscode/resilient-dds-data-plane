@@ -26,6 +26,13 @@ std::vector<std::string> validate(const QosProfile& profile) {
     if (profile.durability == Durability::transient_local && profile.reliability != Reliability::reliable) {
         errors.emplace_back("transient-local replay should use reliable delivery for deterministic late-joiner recovery");
     }
+    // KEEP_ALL retains until acknowledged. Reliable delivery to a reader that
+    // stops draining then grows writer memory with no ceiling, which fails as
+    // an out-of-memory kill rather than as a QoS event.
+    if (profile.history == History::keep_all && profile.reliability == Reliability::reliable &&
+        profile.max_samples == 0) {
+        errors.emplace_back("keep-all reliable history needs max_samples: an undrained reader grows writer memory without bound");
+    }
     return errors;
 }
 
