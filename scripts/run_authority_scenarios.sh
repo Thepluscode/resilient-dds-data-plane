@@ -96,6 +96,16 @@ if grep -Fq "current=$standby_handle" "$exclusive.reader.log"; then
     exit 1
 fi
 
+# Positive control for the suppression claim. A standby that died at startup is
+# also "invisible", and that is not the same finding at all -- it is exactly the
+# failure mode that hid a QoS rejection behind a WRITER_READY timeout. Require
+# proof the standby was writing while it was being suppressed.
+standby_wrote=$(awk '/WRITER_PROGRESS/ { for (i=1;i<=NF;i++) if ($i ~ /^wrote=/) { sub(/^wrote=/,"",$i); n=$i } } END { print n+0 }' "$exclusive.standby.log")
+if (( standby_wrote < 10 )); then
+    echo "FAIL exclusive_failover: standby was invisible because it was not writing (wrote=$standby_wrote)" >&2
+    exit 1
+fi
+
 kill_ns=$(date +%s%N)
 kill -9 "$primary_pid" 2>/dev/null || true
 wait_for "current=$standby_handle" "$exclusive.reader.log" 80
@@ -124,7 +134,7 @@ fi
 wait "$reader_pid"
 kill -9 "$standby_pid" 2>/dev/null || true
 
-echo "PASS exclusive_primary_dominates primary=$primary_handle standby=$standby_handle"
+echo "PASS exclusive_primary_dominates primary=$primary_handle standby=$standby_handle standby_wrote=$standby_wrote"
 echo "PASS exclusive_hard_failover failover_ms=$failover_ms first_standby_age_ms=$age_ms"
 
 cat > "$OUT/matrix.md" <<MD
@@ -133,7 +143,7 @@ cat > "$OUT/matrix.md" <<MD
 | scenario | result | evidence |
 |---|---|---|
 | shared_control | PASS | both writer handles visible; owner_changes=$shared_changes |
-| exclusive_primary_dominates | PASS | strength-10 standby stayed invisible while strength-100 primary was alive and both writers matched |
+| exclusive_primary_dominates | PASS | strength-10 standby stayed invisible while writing $standby_wrote samples, with the strength-100 primary alive and both writers matched |
 | exclusive_hard_failover | PASS | standby became visible after SIGKILL; failover_ms=$failover_ms; first_standby_age_ms=$age_ms |
 MD
 

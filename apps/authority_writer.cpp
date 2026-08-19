@@ -173,6 +173,13 @@ int main(int argc, char** argv) {
             std::cerr << "WRITE_FAILED role=" << o.role << " seq=" << seq << "\n";
             break;
         }
+        // A suppressed standby and a dead standby are both "invisible" to the
+        // reader. Without proof that the standby is actually writing, the
+        // ownership-suppression assertion passes for either reason.
+        if (seq % 10 == 0) {
+            std::cout << "WRITER_PROGRESS role=" << o.role << " wrote=" << seq
+                      << " at_ns=" << now_ns() << "\n" << std::flush;
+        }
         std::this_thread::sleep_for(period);
     }
 
