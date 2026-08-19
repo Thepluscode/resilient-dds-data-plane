@@ -207,7 +207,9 @@ The experiment deliberately separates two failure paths rather than collapsing t
 - with `extra_samples=1`, allocation can succeed while history is full, so the writer reaches the bounded reliable-history wait and returns `RETCODE_TIMEOUT` near its configured 50 ms `max_blocking_time`;
 - after `SIGCONT`, successful publication must recover.
 
-Final PR-head evidence on commit `6c986ec` produced **7/7 PASS**:
+The immutable Milestone 4B implementation evidence anchor is commit `6c986ec`, validated by combined run `32227232142` and artifact SHA-256 `8a3208f19750df5a4542832f4e6169c0bfc317c79c36975672caa0a4d2fcd605`. Later documentation-only successors are required to pass the same CI gates but do not redefine this experiment.
+
+That implementation run produced **7/7 PASS**:
 
 ```text
 healthy_control                 success=200 timeouts=0 out_of_resources=0 errors=0
