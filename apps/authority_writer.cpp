@@ -96,7 +96,10 @@ int main(int argc, char** argv) {
         std::make_shared<eprosima::fastdds::rtps::UDPv4TransportDescriptor>());
 
     auto* participant = factory->create_participant(o.domain, participant_qos);
-    if (participant == nullptr) return 2;
+    if (participant == nullptr) {
+        std::cerr << "SETUP_FAILED entity=participant domain=" << o.domain << "\n";
+        return 2;
+    }
 
     fdds::TypeSupport type(new resilientdds::SystemTelemetryPubSubType());
     type.register_type(participant);
@@ -109,6 +112,8 @@ int main(int argc, char** argv) {
     auto* topic = participant->create_topic(o.topic, type.get_type_name(), topic_qos);
     auto* publisher = participant->create_publisher(fdds::PUBLISHER_QOS_DEFAULT);
     if (topic == nullptr || publisher == nullptr) {
+        std::cerr << "SETUP_FAILED entity=" << (topic == nullptr ? "topic" : "publisher")
+                  << " topic_name=" << o.topic << "\n";
         participant->delete_contained_entities();
         factory->delete_participant(participant);
         return 2;
@@ -122,12 +127,21 @@ int main(int argc, char** argv) {
     writer_qos.deadline().period = {0, 100'000'000};
     writer_qos.liveliness().kind = fdds::AUTOMATIC_LIVELINESS_QOS;
     writer_qos.liveliness().lease_duration = {0, 500'000'000};
+    // Fast DDS defaults announcement_period to infinite and rejects any writer
+    // whose lease is not strictly longer than it ("LeaseDuration <= announcement
+    // period"). Omitting this makes create_datawriter return nullptr, so the
+    // process dies before it can report anything useful.
+    writer_qos.liveliness().announcement_period = {0, 250'000'000};
     writer_qos.ownership().kind = ownership_kind;
     writer_qos.ownership_strength().value = o.strength;
 
     WriterListener listener;
     auto* writer = publisher->create_datawriter(topic, writer_qos, &listener);
     if (writer == nullptr) {
+        // Fast DDS logs the rejected policy to RTPS_QOS_CHECK, but a bare
+        // `return 2` hides it behind "process exited before WRITER_READY".
+        std::cerr << "SETUP_FAILED entity=datawriter role=" << o.role
+                  << " (check RTPS_QOS_CHECK output above for the rejected policy)\n";
         participant->delete_contained_entities();
         factory->delete_participant(participant);
         return 2;

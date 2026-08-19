@@ -121,7 +121,10 @@ int main(int argc, char** argv) {
     participant_qos.transport().user_transports.push_back(
         std::make_shared<eprosima::fastdds::rtps::UDPv4TransportDescriptor>());
     auto* participant = factory->create_participant(o.domain, participant_qos);
-    if (participant == nullptr) return 2;
+    if (participant == nullptr) {
+        std::cerr << "SETUP_FAILED entity=participant domain=" << o.domain << "\n";
+        return 2;
+    }
 
     fdds::TypeSupport type(new resilientdds::SystemTelemetryPubSubType());
     type.register_type(participant);
@@ -133,6 +136,8 @@ int main(int argc, char** argv) {
     auto* topic = participant->create_topic(o.topic, type.get_type_name(), topic_qos);
     auto* subscriber = participant->create_subscriber(fdds::SUBSCRIBER_QOS_DEFAULT);
     if (topic == nullptr || subscriber == nullptr) {
+        std::cerr << "SETUP_FAILED entity=" << (topic == nullptr ? "topic" : "subscriber")
+                  << " topic_name=" << o.topic << "\n";
         participant->delete_contained_entities();
         factory->delete_participant(participant);
         return 2;
@@ -151,6 +156,8 @@ int main(int argc, char** argv) {
     ReaderListener listener;
     auto* reader = subscriber->create_datareader(topic, reader_qos, &listener);
     if (reader == nullptr) {
+        std::cerr << "SETUP_FAILED entity=datareader"
+                  << " (check RTPS_QOS_CHECK output above for the rejected policy)\n";
         participant->delete_contained_entities();
         factory->delete_participant(participant);
         return 2;
