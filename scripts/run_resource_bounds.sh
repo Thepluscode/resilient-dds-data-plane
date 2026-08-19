@@ -48,6 +48,14 @@ record_fail() { echo "FAIL $1  <- $2"; fail=$((fail + 1)); }
 # One extra sample is a deliberate reservoir outside max_samples. It allows a
 # ninth change to be allocated while history is full, so a healthy reader has a
 # chance to ACK and release history before max_blocking_time expires.
+#
+# The rate is 50 Hz, not 200. At 200 Hz nine slots are only ~45 ms of buffer
+# against a 50 ms blocking budget, so the "healthy" case was really a test of
+# host speed: it passed on GitHub runners and failed 3 runs out of 3 on a
+# contended laptop VM at 181/200. A control that fails on slower hardware trains
+# people to re-run until green. 50 Hz gives ~180 ms of headroom, and the frozen
+# reader below keeps the identical writer config so the comparison still isolates
+# the reader.
 echo "== healthy reliable reader: bounded history plus reservoir =="
 domain=191
 healthy_reader="$OUT/healthy.reader.log"
@@ -55,7 +63,7 @@ healthy_writer="$OUT/healthy.writer.log"
 : > "$healthy_reader"; : > "$healthy_writer"
 "$READER" --domain "$domain" --duration-s 20 > "$healthy_reader" 2>&1 & reader_pid=$!
 wait_for RESOURCE_READER_READY "$healthy_reader" "$reader_pid"
-"$WRITER" --domain "$domain" --count 200 --rate-hz 200 --history-limit 8 --extra-samples 1 --max-blocking-ms 50 \
+"$WRITER" --domain "$domain" --count 200 --rate-hz 50 --history-limit 8 --extra-samples 1 --max-blocking-ms 50 \
     > "$healthy_writer" 2>&1 & writer_pid=$!
 wait "$writer_pid"; writer_pid=""
 kill "$reader_pid" 2>/dev/null || true; wait "$reader_pid" 2>/dev/null || true; reader_pid=""
@@ -118,7 +126,7 @@ stall_writer="$OUT/stall.writer.log"
 : > "$stall_reader"; : > "$stall_writer"
 "$READER" --domain "$domain" --duration-s 30 > "$stall_reader" 2>&1 & reader_pid=$!
 wait_for RESOURCE_READER_READY "$stall_reader" "$reader_pid"
-"$WRITER" --domain "$domain" --count 300 --rate-hz 200 --history-limit 8 --extra-samples 1 \
+"$WRITER" --domain "$domain" --count 300 --rate-hz 50 --history-limit 8 --extra-samples 1 \
     --max-blocking-ms 50 --start-delay-ms 300 > "$stall_writer" 2>&1 & writer_pid=$!
 wait_for RESOURCE_WRITER_MATCHED "$stall_writer" "$writer_pid"
 stall_start_ms=$(date +%s%3N)
