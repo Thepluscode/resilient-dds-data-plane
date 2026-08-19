@@ -54,18 +54,34 @@ Outstanding security hardening:
 - dependency/CVE release gate;
 - tamper-evident evidence only where the target system requires it.
 
-## Milestone 4 — Multi-writer authority and bounded resources
-This is the next engineering priority because it addresses a real command/control pain: more than one writer may be alive, but only the correct authority should control a keyed state.
+## Milestone 4A — Multi-writer authority (implemented)
+Evidence: PR #2, `scripts/run_authority_scenarios.sh`.
 
-Planned evidence:
-- two writers for the same keyed instance;
-- explicit primary/standby authority contract;
-- deterministic ownership/failover behavior;
-- hard-kill primary and measure standby takeover gap;
-- prove no split-brain application state during overlap;
+- two writers on the same keyed instance, SHARED control proving both are visible;
+- EXCLUSIVE primary (strength 100) suppresses standby (strength 10) while alive;
+- SIGKILL of the primary produces takeover in 86 ms;
+- the first standby sample is inside the 250 ms freshness budget, so authority is
+  correct AND the state is usable;
+- a control asserting the standby was actually publishing while suppressed,
+  because a dead standby is equally invisible.
+
+## Milestone 4B — Writer-side bounded resources (implemented)
+Evidence: [BOUNDED_RESOURCES.md](BOUNDED_RESOURCES.md).
+
+- QoS contract extended with history kind, `max_samples` and `max_blocking_ms`;
+- KEEP_LAST vs KEEP_ALL under a reader permanently slower than its writer;
+- measured: KEEP_LAST loses data with zero write failures, while KEEP_ALL turns
+  the same loss into blocking and failed writes the producer can act on;
+- `max_blocking_time = 0` makes the producer learn sooner and lose more;
+- validate() refuses unbounded keep-all reliable history, with a unit test
+  asserting the rule does not over-fire on best-effort;
+- four controls, each observed failing under mutation.
+
+Outstanding for Milestone 4:
+- direct writer memory/RSS measurement rather than a configured ceiling;
 - multiple independent keyed sources with per-source sequence/freshness isolation;
-- bounded reader/writer history and resource-limit behavior;
-- writer-history exhaustion/backpressure test;
+- no-split-brain assertion during writer overlap;
+- bounded resources combined with `tc netem` impairment;
 - many-participant discovery/latency run;
 - soak run with fixed memory/CPU evidence.
 

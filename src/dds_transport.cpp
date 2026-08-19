@@ -43,11 +43,25 @@ void apply_profile(QosT& qos, const QosProfile& profile) {
     qos.reliability().kind = profile.reliability == Reliability::reliable
                                  ? ddsapi::RELIABLE_RELIABILITY_QOS
                                  : ddsapi::BEST_EFFORT_RELIABILITY_QOS;
+    // How long write() waits for history space before failing. This is the
+    // knob that turns a full writer history into an observable event instead of
+    // an indefinite stall.
+    qos.reliability().max_blocking_time = ms_to_duration(profile.max_blocking_ms);
     qos.durability().kind = profile.durability == Durability::transient_local
                                 ? ddsapi::TRANSIENT_LOCAL_DURABILITY_QOS
                                 : ddsapi::VOLATILE_DURABILITY_QOS;
-    qos.history().kind = ddsapi::KEEP_LAST_HISTORY_QOS;
+    qos.history().kind = profile.history == History::keep_all ? ddsapi::KEEP_ALL_HISTORY_QOS
+                                                              : ddsapi::KEEP_LAST_HISTORY_QOS;
     qos.history().depth = static_cast<std::int32_t>(profile.history_depth);
+    if (profile.max_samples > 0) {
+        // Fast DDS enforces max_samples >= max_instances * max_samples_per_instance
+        // and rejects the writer otherwise. Bounding the per-instance limit
+        // without also bounding instances fails that check, so pin instances to
+        // the single keyed source this lab publishes.
+        qos.resource_limits().max_samples = static_cast<std::int32_t>(profile.max_samples);
+        qos.resource_limits().max_instances = 1;
+        qos.resource_limits().max_samples_per_instance = static_cast<std::int32_t>(profile.max_samples);
+    }
     if (profile.deadline_ms > 0) {
         qos.deadline().period = ms_to_duration(profile.deadline_ms);
     }
@@ -167,6 +181,8 @@ struct TelemetryPublisher::Impl : public ddsapi::DataWriterListener {
 
     MetricsRegistry& metrics;
     std::atomic<int> match_count{0};
+    std::atomic<std::uint64_t> total_blocked_us{0};
+    std::atomic<std::uint64_t> max_blocked_us{0};
     ddsapi::DomainParticipant* participant{nullptr};
     ddsapi::Publisher* publisher{nullptr};
     ddsapi::Topic* topic{nullptr};
@@ -238,7 +254,18 @@ bool TelemetryPublisher::publish(const TelemetrySample& sample) {
     wire.health_flags(sample.health_flags);
     wire.schema_version(sample.schema_version);
 
+    // A blocked write is the producer feeling backpressure. Timing it is the
+    // only way to tell "delivered promptly" from "stalled just under the cap".
+    const auto started = std::chrono::steady_clock::now();
     const bool ok = impl_->writer->write(&wire);
+    const auto blocked_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - started).count();
+
+    impl_->total_blocked_us.fetch_add(static_cast<std::uint64_t>(blocked_us));
+    auto prev = impl_->max_blocked_us.load();
+    while (blocked_us > static_cast<std::int64_t>(prev) &&
+           !impl_->max_blocked_us.compare_exchange_weak(prev, static_cast<std::uint64_t>(blocked_us))) {
+    }
     impl_->metrics.increment(ok ? "rdtf_samples_published_total" : "rdtf_publish_failures_total");
     return ok;
 }
@@ -248,6 +275,10 @@ void TelemetryPublisher::assert_liveliness() {
 }
 
 bool TelemetryPublisher::matched() const { return impl_->match_count.load() > 0; }
+
+TelemetryPublisher::WriteStats TelemetryPublisher::write_stats() const {
+    return {impl_->total_blocked_us.load(), impl_->max_blocked_us.load()};
+}
 
 // --------------------------------------------------------------- subscriber
 

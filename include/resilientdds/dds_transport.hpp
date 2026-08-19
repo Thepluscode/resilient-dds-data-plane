@@ -68,6 +68,14 @@ public:
     void assert_liveliness();
     bool matched() const;
 
+    // Time spent inside write(). Non-zero means the writer's history filled and
+    // the producer was made to wait -- the observable form of backpressure.
+    struct WriteStats {
+        std::uint64_t total_blocked_us{0};
+        std::uint64_t max_blocked_us{0};
+    };
+    WriteStats write_stats() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

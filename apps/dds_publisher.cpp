@@ -28,6 +28,10 @@ struct Options {
     std::uint64_t schema_drift_at{0};
     std::uint32_t stall_at{0};
     std::uint32_t wait_match_ms{3000};
+    // Milestone 4B overrides. Left at -1 the profile's own value is used.
+    int history_keep_all{-1};
+    int max_samples{-1};
+    int max_blocking_ms{-1};
     bool allow_shm{false};
 };
 
@@ -60,6 +64,9 @@ int main(int argc, char** argv) {
         else if (k == "--schema-drift-at") o.schema_drift_at = u64(v);
         else if (k == "--stall-at") o.stall_at = static_cast<std::uint32_t>(u64(v));
         else if (k == "--wait-match-ms") o.wait_match_ms = static_cast<std::uint32_t>(u64(v));
+        else if (k == "--history") o.history_keep_all = (std::string(v) == "keep_all") ? 1 : 0;
+        else if (k == "--max-samples") o.max_samples = std::atoi(v);
+        else if (k == "--max-blocking-ms") o.max_blocking_ms = std::atoi(v);
     }
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--allow-shm") o.allow_shm = true;
@@ -68,7 +75,18 @@ int main(int argc, char** argv) {
 
     MetricsRegistry metrics;
     TelemetryPublisher publisher(metrics);
-    const QosProfile profile = pick(o.profile);
+    QosProfile profile = pick(o.profile);
+    if (o.history_keep_all >= 0) {
+        profile.history = o.history_keep_all ? History::keep_all : History::keep_last;
+    }
+    if (o.max_samples >= 0) profile.max_samples = static_cast<std::uint32_t>(o.max_samples);
+    if (o.max_blocking_ms >= 0) profile.max_blocking_ms = static_cast<std::uint32_t>(o.max_blocking_ms);
+    std::cout << "WRITER_QOS history=" << (profile.history == History::keep_all ? "keep_all" : "keep_last")
+              << " depth=" << profile.history_depth
+              << " max_samples=" << profile.max_samples
+              << " max_blocking_ms=" << profile.max_blocking_ms
+              << " reliability=" << (profile.reliability == Reliability::reliable ? "reliable" : "best_effort")
+              << "\n" << std::flush;
     const auto security = security_from_directory(o.security_dir, o.security_role);
 
     if (!publisher.start(o.domain, o.topic, profile,
@@ -127,6 +145,12 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_for(period);
     }
 
+    const auto ws = publisher.write_stats();
+    metrics.gauge("rdtf_write_blocked_total_us", static_cast<double>(ws.total_blocked_us));
+    metrics.gauge("rdtf_write_blocked_max_us", static_cast<double>(ws.max_blocked_us));
+    std::cout << "WRITE_STATS attempted=" << o.count
+              << " blocked_total_us=" << ws.total_blocked_us
+              << " blocked_max_us=" << ws.max_blocked_us << "\n";
     std::cout << "PUBLISHER done\n" << metrics.render_prometheus() << std::flush;
     return 0;
 }
