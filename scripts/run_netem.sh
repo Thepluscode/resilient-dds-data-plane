@@ -40,7 +40,13 @@ impairment_run() {
     local tag="${label}_${profile}"
     local log="$OUT/$tag.log" prom="$OUT/$tag.prom"
 
-    apply_netem "$netem"
+    # Discovery must complete on a CLEAN link before the impairment is applied.
+    # RTPS discovery runs over the same loopback as the data, so impairing first
+    # means 15% loss is also dropping participant announcements: the endpoints
+    # sometimes never match and the cell reports "moved no data at all", which
+    # reads as a delivery result but is a discovery failure. Observed twice in
+    # CI, once on each profile, and it turned main red on a docs-only merge.
+    clear_netem
     "$SUB" --domain $domain --profile "$profile" --duration-s "$DURATION" \
            --metrics-out "$prom" --audit-out "$OUT/$tag.jsonl" > "$log" 2>&1 &
     local sub_pid=$!
@@ -48,6 +54,19 @@ impairment_run() {
     "$PUB" --domain $domain --profile "$profile" --count $((RATE_HZ * (DURATION + 20))) \
            --rate-hz "$RATE_HZ" >> "$log" 2>&1 &
     local pub_pid=$!
+
+    local matched=0
+    for _ in $(seq 1 60); do
+        grep -q 'MATCH writers=1' "$log" 2>/dev/null && { matched=1; break; }
+        sleep 0.1
+    done
+    if [[ $matched -eq 0 ]]; then
+        echo "FAIL $tag: endpoints never matched on a clean link" >&2
+        kill -9 $sub_pid $pub_pid 2>/dev/null; wait $sub_pid $pub_pid 2>/dev/null
+        fail=$((fail + 1))
+        return
+    fi
+    apply_netem "$netem"
     wait $sub_pid
     kill -9 $pub_pid 2>/dev/null; wait $pub_pid 2>/dev/null
     clear_netem
