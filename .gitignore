@@ -3,3 +3,7 @@ generated/
 *.jsonl
 .DS_Store
 build-linux/
+
+# Per-run artefacts. matrix.md is the summary the docs cite and is kept.
+evidence/*
+!evidence/matrix.md

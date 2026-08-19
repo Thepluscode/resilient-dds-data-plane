@@ -1,4 +1,4 @@
-name: DDS failure and security scenarios
+name: DDS failure, security and authority scenarios
 
 on: [push, pull_request]
 
@@ -17,7 +17,7 @@ jobs:
           tags: rdtf-fastdds:2.14.6
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: Build and validate RTPS, netem and DDS Security
+      - name: Build and validate RTPS, netem, DDS Security and authority
         run: |
           docker run --rm \
             --network host \
@@ -36,6 +36,7 @@ jobs:
               ./scripts/security/generate_test_pki.sh /tmp/rdtf-security-pki
               BUILD=build-dds PKI=/tmp/rdtf-security-pki OUT=evidence/security \
                 ./scripts/security/run_security_scenarios.sh
+              BUILD=build-dds OUT=evidence/authority ./scripts/run_authority_scenarios.sh
             '
       - uses: actions/upload-artifact@v4
         if: always()
