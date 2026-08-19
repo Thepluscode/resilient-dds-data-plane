@@ -91,6 +91,35 @@ something, and each one has caught a real defect in this repository:
   round-robin ordering. Neither was visible by reading the code.
 - **Absence is not proof.** A "the marker is not in the packet capture" claim
   ships with a plaintext run proving the capture can see the marker at all.
+- **Read the fault, not its consequence.** One control asserted a reader had
+  been frozen by checking it received *fewer* samples than its peers. Against a
+  RELIABLE transient-local writer that is false — on resume the reader drains
+  its whole retained backlog and can finish *ahead* of readers that never
+  stalled (649 vs 453, observed). Sample count was only a proxy; the direct
+  evidence is state `T` in `/proc/<pid>/stat`. Observing a downstream effect is
+  not observing the condition being asserted.
+- **The merge gate was falsified too.** It originally evaluated PR checks across
+  multiple commits instead of restricting evidence to the current head SHA. That
+  meant a stale failure could block a valid head — and, more dangerously, a
+  stale success could theoretically admit a broken one. The gate now resolves
+  the exact head SHA, considers only workflow runs attached to that commit, and
+  fails closed when no matching runs exist — it is
+  [`scripts/merge_gate.sh`](scripts/merge_gate.sh), in the repository, so this
+  claim is checkable rather than asserted. Like several scenario controls here,
+  the gate itself had to be tested rather than trusted.
+
+The principle underneath all of them, and the reason this section exists:
+
+```text
+A gate is only valid if it proves the exact state it claims to gate.
+A correct check against the wrong commit is still a false control.
+
+        confident answer  ≠  answer to the question actually asked
+```
+
+That is the same failure this project studies in DDS. A middleware that reports
+healthy communication is answering a real question — just not the one the
+application needed answered.
 
 ## Architecture
 
