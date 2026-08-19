@@ -179,7 +179,7 @@ cat > "$OUT/matrix.md" <<EOF
 | frozen reader, reservoir | 8 KEEP_ALL + 1 extra | 50 ms | timeout=$stall_timeouts, OOR=$stall_oor, max_timeout_us=$stall_max_timeout_us |
 | SIGCONT recovery | 8 KEEP_ALL + 1 extra | 50 ms | recovered=$stall_recovered, resume_to_recovery_ms=${recovery_ms:-n/a} |
 
-`RETCODE_OUT_OF_RESOURCES` and `RETCODE_TIMEOUT` are intentionally separate
+RETCODE_OUT_OF_RESOURCES and RETCODE_TIMEOUT are intentionally separate
 observations. The first means the writer could not obtain a payload/cache change;
 the second means a change was allocated but could not enter full reliable history
 before max_blocking_time expired.
