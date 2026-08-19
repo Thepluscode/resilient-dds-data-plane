@@ -90,6 +90,30 @@ Outstanding for Milestone 4:
 - many-participant discovery/latency run;
 - soak run with fixed memory/CPU evidence.
 
+## Milestone 4C — Fan-out and resource isolation (implemented)
+Evidence: [FANOUT_ISOLATION.md](FANOUT_ISOLATION.md).
+
+- 8 concurrent readers: 0 gaps, worst p99 1.5 ms;
+- one reader frozen with SIGSTOP: starved to 254 while the healthy seven stayed
+  at 522 minimum, no measurable coupling;
+- **Fast DDS silently caps keyed instances at 10 by default** — 32-key topic
+  delivered 10 of 32 with no error anywhere, and 32 of 32 once max_instances was
+  raised. Raising it alone rejects the endpoint, so the pool is now sized as
+  instances x history_depth;
+- fixed a latent 4B bug that hardcoded max_instances = 1;
+- one key at 20x did not starve unrelated keys, 0 staleness on the other seven;
+- 5 reader-churn cycles: writer RSS +1%, still publishing. First observed
+  process-resource evidence rather than a configured ceiling;
+- controls mutated: not freezing the reader and not making the hot key hot both
+  turn their assertions red.
+
+Outstanding:
+- fan-out combined with tc netem impairment;
+- reader-side RSS/CPU;
+- soak-duration churn rather than 5 cycles;
+- multi-writer fan-in;
+- instance scaling beyond 32.
+
 ## Milestone 5 — Vendor portability
 - RTI Connext adapter when an SDK/licence is available;
 - common semantic test suite against both backends;

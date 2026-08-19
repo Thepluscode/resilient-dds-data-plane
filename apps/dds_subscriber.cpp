@@ -33,6 +33,7 @@ int main(int argc, char** argv) {
     int start_delay_ms = 0;
     int poll_ms = 20;
     int process_delay_us = 0;
+    int max_instances = -1;
     bool allow_shm = false;
     std::int64_t max_age_ms = 250;
 
@@ -52,6 +53,7 @@ int main(int argc, char** argv) {
         else if (k == "--max-age-ms") max_age_ms = std::atoll(v);
         else if (k == "--poll-ms") poll_ms = std::atoi(v);
         else if (k == "--process-delay-us") process_delay_us = std::atoi(v);
+        else if (k == "--max-instances") max_instances = std::atoi(v);
     }
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--allow-shm") allow_shm = true;
@@ -68,7 +70,8 @@ int main(int argc, char** argv) {
     AuditSink audit(audit_path);
     TelemetrySubscriber subscriber(detector, health, metrics, audit.good() ? &audit : nullptr);
 
-    const QosProfile profile = pick(profile_name);
+    QosProfile profile = pick(profile_name);
+    if (max_instances >= 0) profile.max_instances = static_cast<std::uint32_t>(max_instances);
     const auto security = security_from_directory(security_dir, security_role);
     subscriber.set_source(source_id);
     subscriber.set_processing_delay_us(process_delay_us);
