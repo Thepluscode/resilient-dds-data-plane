@@ -98,7 +98,15 @@ sleep 3
 # SIGSTOP, not a slow loop: the reader stops draining entirely while staying
 # matched and alive to DDS. That is the case a RELIABLE writer must absorb.
 frozen_pid=${s2_pids[$((READERS - 1))]}
-kill -STOP "$frozen_pid" 2>/dev/null && echo "  froze reader $READERS (pid $frozen_pid)"
+kill -STOP "$frozen_pid" 2>/dev/null
+sleep 0.3
+# Verify the freeze from the process table, not from sample counts. Against a
+# RELIABLE transient-local writer a resumed reader drains its whole retained
+# backlog at once, so it can finish with MORE samples than readers that never
+# stalled -- observed in CI at 649 vs 453. Inferring the fault from the count is
+# therefore invalid; 'T' in /proc/<pid>/stat is direct evidence.
+frozen_state=$(awk '{print $3}' "/proc/$frozen_pid/stat" 2>/dev/null)
+echo "  froze reader $READERS (pid $frozen_pid, state=${frozen_state:-gone})"
 sleep $((DURATION - 3))
 kill -CONT "$frozen_pid" 2>/dev/null
 sleep 2
@@ -115,14 +123,14 @@ degradation=$(( s1_min > 0 ? (100 - (s2_healthy_min * 100 / s1_min)) : 100 ))
 echo "  healthy min=$s2_healthy_min (baseline $s1_min, degradation ${degradation}%)  frozen=$s2_frozen"
 echo "s2 healthy_min=$s2_healthy_min frozen=$s2_frozen degradation=$degradation" >> "$OUT/raw.txt"
 
-# Control: the freeze must actually have starved the frozen reader, or "healthy
-# readers were fine" is a statement about a fault that never happened.
-if [[ $s2_frozen -ge $s2_healthy_min ]]; then
-    bad fault_isolation "frozen reader got $s2_frozen vs healthy $s2_healthy_min - the freeze did nothing"
+# Control: the fault must actually have occurred, or "healthy readers were fine"
+# is a statement about a freeze that never happened. State 'T' is stopped.
+if [[ "${frozen_state:-}" != "T" ]]; then
+    bad fault_isolation "reader $READERS was not stopped (state=${frozen_state:-gone}) - the freeze never happened"
 elif [[ $degradation -gt 25 ]]; then
     bad fault_isolation "healthy readers lost ${degradation}% vs baseline - one frozen reader coupled to the rest"
 else
-    ok fault_isolation "frozen=$s2_frozen starved, healthy min=$s2_healthy_min, degradation ${degradation}%"
+    ok fault_isolation "reader $READERS confirmed stopped, healthy min=$s2_healthy_min, degradation ${degradation}% (frozen drained $s2_frozen on resume)"
 fi
 
 # ------------------------------------------------------------ S3 many keys

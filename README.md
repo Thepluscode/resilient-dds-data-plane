@@ -10,7 +10,9 @@ assertions:
 > holding is still safe to act on?**
 
 Every number below is produced by a script in this repository and reproduced by
-CI on every push.
+CI on every push. Figures are from real runs and move a little between them; the
+direction of every comparison is what is stable, and each doc records the range
+observed.
 
 ## Three results worth your attention
 
@@ -68,7 +70,7 @@ presenting. Narration, timings and expected questions: [docs/DEMO.md](docs/DEMO.
 | RTPS failure semantics | 10 scenarios: gap, duplicate, stale, schema drift, deadline, liveliness, late-joiner, QoS mismatch | [VALIDATION_EVIDENCE.md](docs/VALIDATION_EVIDENCE.md) |
 | Network degradation | 6 impairments × 2 QoS contracts, partition/recovery timing, time-to-unsafe | [NETWORK_DEGRADATION.md](docs/NETWORK_DEGRADATION.md) |
 | DDS Security | PKI-DH auth, signed governance, rogue/unauthorized/insecure denial, paired plaintext-vs-encrypted capture | [DDS_SECURITY.md](docs/DDS_SECURITY.md) |
-| Multi-writer authority | EXCLUSIVE ownership, SIGKILL failover in 86 ms, first standby sample fresh | [ROADMAP.md](docs/ROADMAP.md) |
+| Multi-writer authority | EXCLUSIVE ownership, SIGKILL failover under 110 ms (81-103 ms observed across CI and a contended laptop), first standby sample inside the freshness budget | [ROADMAP.md](docs/ROADMAP.md) |
 | Writer resource bounds | `OUT_OF_RESOURCES` (8 µs) vs `TIMEOUT` (50 ms) separated; KEEP_LAST silent loss vs KEEP_ALL backpressure | [BOUNDED_RESOURCES.md](docs/BOUNDED_RESOURCES.md) |
 | Fan-out isolation | 8 readers 0 gaps; frozen reader does not couple; hot key does not starve neighbours; instance cap | [FANOUT_ISOLATION.md](docs/FANOUT_ISOLATION.md) |
 
