@@ -13,20 +13,22 @@ This repository has four useful evidence generations:
 
 The latest combined workflow reruns the earlier RTPS, network, security and authority suites before accepting Milestone 4B evidence.
 
-## Current CI anchors
+## Evidence anchors
 
 | Item | Value |
 |---|---|
-| Verified main baseline | `4ad12c28591baf64fffc803c851342403f92477d` |
-| Current Milestone 4B PR head | `6c986ecf469c4faaac9fcf9f64135d0c406161a6` |
-| Full combined GitHub Actions run | `32227232142` |
-| Evidence artifact | `9356081922` |
-| Evidence artifact SHA-256 | `8a3208f19750df5a4542832f4e6169c0bfc317c79c36975672caa0a4d2fcd605` |
+| Verified main baseline before Milestone 4B | `4ad12c28591baf64fffc803c851342403f92477d` |
+| Immutable Milestone 4B implementation head | `6c986ecf469c4faaac9fcf9f64135d0c406161a6` |
+| Milestone 4B implementation workflow | `32227232142` |
+| Implementation evidence artifact | `9356081922` |
+| Implementation artifact SHA-256 | `8a3208f19750df5a4542832f4e6169c0bfc317c79c36975672caa0a4d2fcd605` |
 | Runner | GitHub Actions `ubuntu-24.04` |
 | Scenario container | `ubuntu:22.04` |
 | Compiler in scenario image | GCC 11.4.0, C++17 |
 | DDS | Fast DDS **2.14.6**, source build, `SECURITY=ON` |
 | IDL codegen | Fast DDS-Gen **3.3.2** |
+
+The implementation anchor is intentionally immutable. Documentation-only commits after `6c986ec` must still pass normal CI, sanitizers and the full combined scenario workflow, but they do not redefine the measured Milestone 4B experiment or create a self-referential "current docs SHA" evidence loop.
 
 The scenario Dockerfile uses repository-root context:
 
@@ -36,11 +38,13 @@ docker build -t rdtf-build -f docker/Dockerfile .
 
 ## Core compiler/test gates
 
-On the current Milestone 4B head:
+On the Milestone 4B implementation head:
 
 - core CI: **PASS**;
 - AddressSanitizer + UndefinedBehaviorSanitizer core/unit-test gate: **PASS**;
 - full Fast DDS RTPS/netem/security/authority/resource-bound scenario workflow: **PASS**.
+
+Later documentation-only successors are also required to pass these gates before review/merge.
 
 The core uses strict warnings and the unit suite validates sequence/freshness/schema logic, QoS-profile validation and health-state transitions.
 
@@ -50,7 +54,7 @@ Scope limit: live DDS transport threads are not yet covered by the sanitizer gat
 
 The current Fast DDS 2.14.6 workflow reruns the real-process RTPS failure suite before every later milestone gate.
 
-Result on run `32227232142`: **10 passed, 0 failed**.
+Result on the Milestone 4B implementation run: **10 passed, 0 failed**.
 
 The scenario set covers:
 
@@ -65,7 +69,7 @@ The scenario set covers:
 - hard writer death/liveliness expiry;
 - incompatible QoS.
 
-Current-run controls included:
+Implementation-run controls included:
 
 ```text
 PASS baseline          received=137 anomalies=0
@@ -82,9 +86,9 @@ PASS qos_mismatch      INCOMPATIBLE_QOS last_policy_id=11
 
 ## Milestone 2 — network degradation and recovery
 
-The current 2.14.6 regression run passed the `tc netem` matrix: **14 runs, 0 failed**.
+The Milestone 4B implementation run passed the `tc netem` matrix: **14 runs, 0 failed**.
 
-One current-run slice:
+One implementation-run slice:
 
 | impairment | profile | received | gaps | stale | deadline misses | p50 us | p99 us |
 |---|---|---:|---:|---:|---:|---:|---:|
@@ -101,7 +105,7 @@ Do not turn one cell into a statistical guarantee. The useful engineering observ
 - BEST_EFFORT can expose loss as missing application samples;
 - both contracts can breach operational timing under sufficiently bad conditions.
 
-### Partition/recovery observation from the current run
+### Partition/recovery observation from the implementation run
 
 ```text
 partition applied          t=6995 ms
@@ -126,7 +130,7 @@ Full Milestone 2 discussion: [NETWORK_DEGRADATION.md](NETWORK_DEGRADATION.md).
 
 Full detail: [DDS_SECURITY.md](DDS_SECURITY.md).
 
-Result on the current combined run: **6 passed, 0 failed**.
+Result on the Milestone 4B combined implementation run: **6 passed, 0 failed**.
 
 ```text
 PASS secure_baseline              received=300
@@ -167,7 +171,7 @@ Scope limit: certificate/CA identity strings may still be visible in security-ha
 
 ## Milestone 4A — multi-writer authority and failover
 
-Milestone 4A is merged into the verified `main` baseline and is rerun by the current combined workflow.
+Milestone 4A is merged into the verified `main` baseline and is rerun by the Milestone 4B combined workflow.
 
 The harness starts with a **SHARED ownership positive control**. Two writers publish the same keyed instance, and the reader uses DDS publication identity to prove it sees both distinct writers. Only after this control succeeds does the experiment evaluate EXCLUSIVE ownership.
 
@@ -180,7 +184,7 @@ standby ownership strength = 10
 
 Both writers remain alive and matched. The lower-strength standby keeps writing but must remain invisible to the reader while the primary is healthy. The primary is then terminated with `SIGKILL` and the standby must become visible while its first sample is still inside the freshness budget.
 
-Current-run evidence:
+Milestone 4B implementation-run evidence retained 4A:
 
 ```text
 PASS shared_control
@@ -232,7 +236,7 @@ Inspection of the Fast DDS 2.14.6 writer path established two distinct outcomes 
 
 ### Corrected A/B matrix
 
-Current final PR-head run `32227232142`:
+Immutable implementation evidence, run `32227232142`:
 
 ```text
 PASS healthy_control
