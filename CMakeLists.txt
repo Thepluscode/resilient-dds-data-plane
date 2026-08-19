@@ -77,6 +77,17 @@ if(RDTF_ENABLE_FASTDDS)
     add_executable(resilientdds_authority_reader apps/authority_reader.cpp)
     target_include_directories(resilientdds_authority_reader PRIVATE ${RDTF_GEN_DIR})
     target_link_libraries(resilientdds_authority_reader PRIVATE resilientdds_dds)
+
+    # Milestone 4B experiment probes. These isolate writer-side resource pressure
+    # from the existing reader-side slow-consumer scenario. A matched RELIABLE
+    # reader is SIGSTOP'd by the harness so ACKs stop while the match remains.
+    add_executable(resilientdds_resource_writer apps/resource_writer.cpp)
+    target_include_directories(resilientdds_resource_writer PRIVATE ${RDTF_GEN_DIR})
+    target_link_libraries(resilientdds_resource_writer PRIVATE resilientdds_dds)
+
+    add_executable(resilientdds_resource_reader apps/resource_reader.cpp)
+    target_include_directories(resilientdds_resource_reader PRIVATE ${RDTF_GEN_DIR})
+    target_link_libraries(resilientdds_resource_reader PRIVATE resilientdds_dds)
 endif()
 
 if(RDTF_BUILD_TESTS)
