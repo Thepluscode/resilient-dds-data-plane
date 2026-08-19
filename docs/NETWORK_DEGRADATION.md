@@ -147,7 +147,13 @@ one where a health model built only on DDS callbacks reports nothing wrong.
 - single host, containerised on Docker Desktop for macOS (a Linux VM). Absolute
   latencies are not bare-metal figures; the comparisons between rows are the
   point, not the values.
-- impairment applied to `lo`, which affects discovery traffic as well as data.
+- impairment applied to `lo`, which would affect discovery traffic as well as
+  data, so each cell now waits for the endpoints to match on a clean link before
+  the qdisc goes on. Without that, 15% loss intermittently dropped participant
+  announcements and the cell reported "moved no data at all" — a discovery
+  failure wearing the costume of a delivery result. It was seen twice in CI and
+  turned `main` red on a docs-only merge before being diagnosed. The consequence
+  is that roughly the first second of each cell is unimpaired.
 - one publisher, one subscriber, one keyed instance, small payload.
 - 6 s per cell and a single run per cell — enough to show mechanism, not enough
   for statistical claims about the tail. Repeated runs are still outstanding.
