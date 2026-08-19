@@ -1,6 +1,6 @@
 // Milestone 4B probe: bounded RELIABLE writer behavior when a matched reader
 // stops acknowledging data. The reusable adapter intentionally remains unchanged
-// until this failure mode is measured against Fast DDS itself.
+// until these failure modes are measured against Fast DDS itself.
 #include "SystemTelemetry.h"
 #include "SystemTelemetryPubSubTypes.h"
 #include "resilientdds/telemetry.hpp"
@@ -43,8 +43,10 @@ struct Options {
     std::uint64_t count{600};
     std::uint32_t rate_hz{200};
     std::uint32_t history_limit{8};
+    std::uint32_t extra_samples{1};
     std::uint32_t max_blocking_ms{50};
     std::uint32_t wait_match_ms{5000};
+    std::uint32_t start_delay_ms{0};
 };
 
 Options parse(int argc, char** argv) {
@@ -58,8 +60,10 @@ Options parse(int argc, char** argv) {
         else if (k == "--count") o.count = std::stoull(v);
         else if (k == "--rate-hz") o.rate_hz = static_cast<std::uint32_t>(std::stoul(v));
         else if (k == "--history-limit") o.history_limit = static_cast<std::uint32_t>(std::stoul(v));
+        else if (k == "--extra-samples") o.extra_samples = static_cast<std::uint32_t>(std::stoul(v));
         else if (k == "--max-blocking-ms") o.max_blocking_ms = static_cast<std::uint32_t>(std::stoul(v));
         else if (k == "--wait-match-ms") o.wait_match_ms = static_cast<std::uint32_t>(std::stoul(v));
+        else if (k == "--start-delay-ms") o.start_delay_ms = static_cast<std::uint32_t>(std::stoul(v));
     }
     if (o.rate_hz == 0) o.rate_hz = 1;
     if (o.history_limit == 0) o.history_limit = 1;
@@ -120,12 +124,17 @@ int main(int argc, char** argv) {
     qos.resource_limits().max_instances = 1;
     qos.resource_limits().max_samples_per_instance = static_cast<std::int32_t>(o.history_limit);
     qos.resource_limits().allocated_samples = static_cast<std::int32_t>(o.history_limit);
-    qos.resource_limits().extra_samples = 0;
+    // Fast DDS uses extra_samples as a reservoir outside the history's
+    // max_samples. With zero extras, allocation can fail before the history has
+    // a chance to wait for ACKs; with one extra, a write can reach the bounded
+    // history-insertion wait and therefore exercise max_blocking_time.
+    qos.resource_limits().extra_samples = static_cast<std::int32_t>(o.extra_samples);
 
     WriterListener listener;
     auto* writer = publisher->create_datawriter(topic, qos, &listener);
     if (writer == nullptr) {
         std::cerr << "SETUP_FAILED entity=datawriter history_limit=" << o.history_limit
+                  << " extra_samples=" << o.extra_samples
                   << " max_blocking_ms=" << o.max_blocking_ms << "\n";
         participant->delete_contained_entities();
         factory->delete_participant(participant);
@@ -133,6 +142,7 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "RESOURCE_WRITER_READY history_limit=" << o.history_limit
+              << " extra_samples=" << o.extra_samples
               << " max_blocking_ms=" << o.max_blocking_ms << "\n" << std::flush;
 
     for (std::uint32_t waited = 0; waited < o.wait_match_ms && listener.matches.load() == 0; waited += 50) {
@@ -146,12 +156,20 @@ int main(int argc, char** argv) {
     }
     std::cout << "RESOURCE_WRITER_MATCHED readers=" << listener.matches.load() << "\n" << std::flush;
 
+    if (o.start_delay_ms > 0) {
+        std::cout << "RESOURCE_WRITER_START_DELAY ms=" << o.start_delay_ms << "\n" << std::flush;
+        std::this_thread::sleep_for(std::chrono::milliseconds(o.start_delay_ms));
+    }
+
     const auto period = std::chrono::microseconds(1'000'000 / o.rate_hz);
     std::uint64_t successes = 0;
     std::uint64_t timeouts = 0;
+    std::uint64_t out_of_resources = 0;
     std::uint64_t errors = 0;
     std::int64_t max_write_us = 0;
-    bool seen_timeout = false;
+    std::int64_t max_timeout_us = 0;
+    std::int64_t max_out_of_resources_us = 0;
+    bool seen_pressure = false;
     bool recovered = false;
 
     for (std::uint64_t seq = 1; seq <= o.count; ++seq) {
@@ -175,15 +193,22 @@ int main(int argc, char** argv) {
 
         if (rc == ReturnCode_t::RETCODE_OK) {
             ++successes;
-            if (seen_timeout && !recovered) {
+            if (seen_pressure && !recovered) {
                 recovered = true;
                 std::cout << "WRITE_RECOVERED seq=" << seq << " elapsed_us=" << elapsed_us
                           << " wall_ms=" << wall_ms() << "\n" << std::flush;
             }
         } else if (rc == ReturnCode_t::RETCODE_TIMEOUT) {
             ++timeouts;
-            seen_timeout = true;
+            seen_pressure = true;
+            max_timeout_us = std::max(max_timeout_us, elapsed_us);
             std::cout << "WRITE_TIMEOUT seq=" << seq << " elapsed_us=" << elapsed_us
+                      << " wall_ms=" << wall_ms() << "\n" << std::flush;
+        } else if (rc == ReturnCode_t::RETCODE_OUT_OF_RESOURCES) {
+            ++out_of_resources;
+            seen_pressure = true;
+            max_out_of_resources_us = std::max(max_out_of_resources_us, elapsed_us);
+            std::cout << "WRITE_OUT_OF_RESOURCES seq=" << seq << " elapsed_us=" << elapsed_us
                       << " wall_ms=" << wall_ms() << "\n" << std::flush;
         } else {
             ++errors;
@@ -198,8 +223,11 @@ int main(int argc, char** argv) {
     std::cout << "RESOURCE_SUMMARY attempts=" << o.count
               << " success=" << successes
               << " timeouts=" << timeouts
+              << " out_of_resources=" << out_of_resources
               << " errors=" << errors
               << " max_write_us=" << max_write_us
+              << " max_timeout_us=" << max_timeout_us
+              << " max_out_of_resources_us=" << max_out_of_resources_us
               << " recovered=" << (recovered ? 1 : 0)
               << "\n" << std::flush;
 
