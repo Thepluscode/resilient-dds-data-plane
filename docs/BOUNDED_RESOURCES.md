@@ -24,19 +24,41 @@ One run, reproduced by the command above; the harness writes the same table to
 `evidence/backpressure/matrix.md`, which CI uploads as a build artifact rather
 than committing. Absolute figures move
 between runs; the pattern across rows is what the experiment is about, and the
-ranges observed over five runs are given underneath.
+ranges observed over six runs are given underneath.
 
-| case | written | write_fail | blocked_max | recv | gaps |
-|---|---|---|---|---|---|
-| `KEEP_LAST(32)` | 4000 | **0** | 6.7 ms | 1527 | **21** |
-| `KEEP_ALL`, max_samples 64, block 100 ms | 3997 | **3** | 104 ms | 1482 | 3 |
-| `KEEP_ALL`, max_samples 64, **no blocking** | 2153 | **1847** | 14.2 ms | 1513 | 361 |
-| `KEEP_ALL`, max_samples 512, block 100 ms | 3994 | 6 | 102 ms | 1400 | 5 |
+| case | written | timeout | out_of_res | blocked_max | recv | gaps |
+|---|---|---|---|---|---|---|
+| `KEEP_LAST(32)` | 4000 | **0** | 0 | 15.8 ms | 1654 | **23** |
+| `KEEP_ALL`, max_samples 64, block 100 ms | 3984 | **16** | 0 | 105 ms | 1627 | 12 |
+| `KEEP_ALL`, max_samples 64, **no blocking** | 2368 | **1632** | 0 | 9.5 ms | 1559 | 265 |
+| `KEEP_ALL`, max_samples 512, block 100 ms | 3985 | 15 | 0 | 105 ms | 1398 | 6 |
 
 Across runs: `KEEP_LAST` write failures were **always 0** and its reader gaps
-ranged 21–23; `KEEP_ALL` with blocking failed 3–15 writes and always blocked to
-~100 ms; the no-blocking variant rejected 1691–1847 writes and produced 185–361
-gaps. The direction of every comparison held in all five runs.
+ranged 21–23; `KEEP_ALL` with blocking failed 3–16 writes and always blocked to
+~100 ms; the no-blocking variant rejected 1632–1847 writes and produced 185–361
+gaps. The direction of every comparison held in all six runs.
+
+### Timeout is not the only way a writer fails
+
+`write()` returning failure is two distinct conditions, and one counter for both
+hides the diagnosis:
+
+- **`RETCODE_TIMEOUT`** — history was full and the writer waited out
+  `max_blocking_time`. Costs the full budget. Fix is a slower producer, a faster
+  reader, or accepting the loss.
+- **`RETCODE_OUT_OF_RESOURCES`** — the writer could not allocate a cache change
+  at all. Returns in microseconds, never waits. Fix is allocation headroom.
+
+**Every failure in the table above is `TIMEOUT`, with zero `OUT_OF_RESOURCES`.**
+That is a property of this experiment, not of DDS: setting `max_samples` also
+reserves the allocation, so the writer always has somewhere to put the sample
+and only ever waits. Starving the allocation instead produces the other mode —
+see `scripts/run_resource_bounds.sh`, which drives `extra_samples=0` and gets
+`OUT_OF_RESOURCES` failing in ~8 µs against `TIMEOUT` at ~50 ms.
+
+The two harnesses are complementary: this one isolates history backpressure,
+that one isolates allocation exhaustion. Reading either alone would support the
+wrong conclusion about what to fix.
 
 ## What it says
 
@@ -44,27 +66,30 @@ gaps. The direction of every comparison held in all five runs.
 ceiling and no QoS setting moved it. The choice did not change throughput. It
 changed **who finds out**.
 
-- **`KEEP_LAST` loses data silently.** All 4000 writes returned success, and 21
+- **`KEEP_LAST` loses data silently.** All 4000 writes returned success, and 23
   sequence gaps appeared at the reader. The writer overwrites its oldest
   unacknowledged sample to make room, so the producer is never told that
   anything was dropped. For a telemetry stream where the newest value
   supersedes the last, that is correct. For a command channel it means a lost
   command with no error anywhere in the system.
 
-- **`KEEP_ALL` converts loss into backpressure.** The same overload produced 3
-  failed writes and blocked the producer for up to 104 ms — the configured
+- **`KEEP_ALL` converts loss into backpressure.** The same overload produced 16
+  timed-out writes and blocked the producer for up to 105 ms — the configured
   `max_blocking_time`. The producer can now see the condition and decide: shed
-  load, alarm, buffer elsewhere, or fail over. Reader-visible gaps fell from 21
-  to 3.
+  load, alarm, buffer elsewhere, or fail over. Reader-visible gaps fell from 23
+  to 12.
 
 - **Failing fast is not the same as failing well.** With `max_blocking_time = 0`
-  the producer learned immediately — 1847 of 4000 writes rejected — but the
-  reader ended up with 361 gaps, two orders of magnitude worse than blocking.
+  the producer learned immediately — 1632 of 4000 writes rejected — but the
+  reader ended up with 265 gaps, twenty times worse than blocking. Note these
+  are still `TIMEOUT`, not `OUT_OF_RESOURCES`: with a zero budget Fast DDS
+  returns the timeout code without waiting.
   Refusing to wait does not create reader capacity; it just moves the loss
   earlier and makes it larger.
 
 - **A bigger buffer did not help.** Raising `max_samples` from 64 to 512 left
-  reader-visible gaps roughly unchanged (3 → 5) while `recv` fell from 1482 to 1400.
+  reader-visible gaps roughly halved (12 → 6) while `recv` fell from 1627 to 1398 —
+  a worse outcome for the consumer, not a better one.
   Buffering absorbs a burst; it does nothing for a reader that is permanently
   slower than its writer, because there is no later moment at which the backlog
   drains.
@@ -128,8 +153,8 @@ lab pins `max_instances = 1` for its single keyed source.
 - single runs per cell, so the numbers show mechanism, not distribution;
 - no coupling to `tc netem` impairment — this is pure consumer-side overload on
   a healthy link;
-- `KEEP_LAST` blocked up to 6.7 ms and the no-blocking case up to 14.2 ms.
+- `KEEP_LAST` blocked up to 15.8 ms and the no-blocking case up to 9.5 ms.
   Neither is history-full blocking — that path is absent in one and disabled in
   the other — so it is scheduling and ordinary write latency, reported rather
-  than explained. Across runs it varied 2–14 ms, which is why the
+  than explained. Across runs it varied 2–16 ms, which is why the
   backpressure assertion's floor is 50 ms.

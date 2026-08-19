@@ -257,7 +257,14 @@ bool TelemetryPublisher::publish(const TelemetrySample& sample) {
     // A blocked write is the producer feeling backpressure. Timing it is the
     // only way to tell "delivered promptly" from "stalled just under the cap".
     const auto started = std::chrono::steady_clock::now();
-    const bool ok = impl_->writer->write(&wire);
+    // The ReturnCode overload, not the bool one. A single "write failed" counter
+    // conflates two distinct failure modes: OUT_OF_RESOURCES means the writer
+    // could not even allocate a cache change and fails in microseconds, while
+    // TIMEOUT means history was full and it waited out max_blocking_time. They
+    // need different fixes -- more allocation headroom versus a slower producer
+    // or a faster reader -- so reporting them as one number hides the diagnosis.
+    const auto rc = impl_->writer->write(&wire, ddsapi::HANDLE_NIL);
+    const bool ok = (rc == eprosima::fastrtps::types::ReturnCode_t::RETCODE_OK);
     const auto blocked_us = std::chrono::duration_cast<std::chrono::microseconds>(
                                 std::chrono::steady_clock::now() - started).count();
 
@@ -266,7 +273,18 @@ bool TelemetryPublisher::publish(const TelemetrySample& sample) {
     while (blocked_us > static_cast<std::int64_t>(prev) &&
            !impl_->max_blocked_us.compare_exchange_weak(prev, static_cast<std::uint64_t>(blocked_us))) {
     }
-    impl_->metrics.increment(ok ? "rdtf_samples_published_total" : "rdtf_publish_failures_total");
+    if (ok) {
+        impl_->metrics.increment("rdtf_samples_published_total");
+    } else {
+        impl_->metrics.increment("rdtf_publish_failures_total");
+        if (rc == eprosima::fastrtps::types::ReturnCode_t::RETCODE_TIMEOUT) {
+            impl_->metrics.increment("rdtf_publish_timeout_total");
+        } else if (rc == eprosima::fastrtps::types::ReturnCode_t::RETCODE_OUT_OF_RESOURCES) {
+            impl_->metrics.increment("rdtf_publish_out_of_resources_total");
+        } else {
+            impl_->metrics.increment("rdtf_publish_other_error_total");
+        }
+    }
     return ok;
 }
 

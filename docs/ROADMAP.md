@@ -75,7 +75,12 @@ Evidence: [BOUNDED_RESOURCES.md](BOUNDED_RESOURCES.md).
 - `max_blocking_time = 0` makes the producer learn sooner and lose more;
 - validate() refuses unbounded keep-all reliable history, with a unit test
   asserting the rule does not over-fire on best-effort;
-- four controls, each observed failing under mutation.
+- four controls, each observed failing under mutation;
+- write failures split into `TIMEOUT` (history backpressure) and
+  `OUT_OF_RESOURCES` (allocation exhaustion), which a single failure counter
+  conflates. This harness produces only the former because `max_samples` also
+  reserves allocation; `scripts/run_resource_bounds.sh` starves allocation and
+  produces the latter.
 
 Outstanding for Milestone 4:
 - direct writer memory/RSS measurement rather than a configured ceiling;

@@ -43,25 +43,30 @@ run_case() {
            > "$log" 2>&1
     wait $sub_pid
 
-    local sent failed blocked_max recv gaps
+    local sent failed timeout oor blocked_max recv gaps
     sent=$(grep -oE 'rdtf_samples_published_total [0-9]+' "$log" | awk '{print $2}' | head -1); sent=${sent:-0}
     failed=$(grep -oE 'rdtf_publish_failures_total [0-9]+' "$log" | awk '{print $2}' | head -1); failed=${failed:-0}
+    # Split the failures. OUT_OF_RESOURCES is allocation exhaustion and returns
+    # in microseconds; TIMEOUT is history backpressure and costs
+    # max_blocking_time. One counter for both hides which one happened.
+    timeout=$(grep -oE 'rdtf_publish_timeout_total [0-9]+' "$log" | awk '{print $2}' | head -1); timeout=${timeout:-0}
+    oor=$(grep -oE 'rdtf_publish_out_of_resources_total [0-9]+' "$log" | awk '{print $2}' | head -1); oor=${oor:-0}
     blocked_max=$(grep -oE 'blocked_max_us=[0-9]+' "$log" | cut -d= -f2 | head -1); blocked_max=${blocked_max:-0}
     recv=$(num "$sprom" rdtf_samples_received_total)
     gaps=$(num "$sprom" rdtf_anomaly_sequence_gap_total)
 
-    printf '| %-22s | %8s | %8s | %8s | %11s | %6s | %6s |\n' \
-        "$label" "$hist" "$sent" "$failed" "$blocked_max" "$recv" "$gaps" | tee -a "$OUT/matrix.md"
+    printf '| %-22s | %8s | %7s | %7s | %7s | %10s | %5s | %5s |\n' \
+        "$label" "$hist" "$sent" "$timeout" "$oor" "$blocked_max" "$recv" "$gaps" | tee -a "$OUT/matrix.md"
 
-    echo "$label sent=$sent failed=$failed blocked_max_us=$blocked_max recv=$recv gaps=$gaps" >> "$OUT/raw.txt"
+    echo "$label sent=$sent failed=$failed timeout=$timeout oor=$oor blocked_max_us=$blocked_max recv=$recv gaps=$gaps" >> "$OUT/raw.txt"
     if [[ $((sent + failed)) -gt 0 ]]; then pass=$((pass + 1)); else
         echo "FAIL $label: writer never attempted a write"; fail=$((fail + 1)); fi
 }
 
 echo "# Writer-side bounded resources (${RATE_HZ} Hz producer, reader capped ~$((1000000 / READER_DELAY_US))/s)" > "$OUT/matrix.md"
 echo "" >> "$OUT/matrix.md"
-echo '| case | history | written | write_fail | blocked_max_us | recv | gaps |' | tee -a "$OUT/matrix.md"
-echo '|---|---|---|---|---|---|---|' | tee -a "$OUT/matrix.md"
+echo '| case | history | written | timeout | out_of_res | blocked_max_us | recv | gaps |' | tee -a "$OUT/matrix.md"
+echo '|---|---|---|---|---|---|---|---|' | tee -a "$OUT/matrix.md"
 : > "$OUT/raw.txt"
 
 run_case keep_last_depth32   keep_last 0   100
@@ -95,8 +100,10 @@ fi
 # "backpressure" on a system under no pressure at all. Real history-full
 # blocking runs to max_blocking_ms (100 ms here), so 50 ms separates them.
 BLOCK_FLOOR_US=50000
+ka_to=$(grep '^keep_all_64 ' "$OUT/raw.txt" | grep -oE 'timeout=[0-9]+' | cut -d= -f2)
+ka_oor=$(grep '^keep_all_64 ' "$OUT/raw.txt" | grep -oE 'oor=[0-9]+' | cut -d= -f2)
 if [[ ${ka_fail:-0} -gt 0 || ${ka_block:-0} -gt $BLOCK_FLOOR_US ]]; then
-    echo "PASS keep_all_backpressure  <- write failures=$ka_fail, max blocked=${ka_block}us"
+    echo "PASS keep_all_backpressure  <- timeouts=${ka_to:-0} out_of_resources=${ka_oor:-0} max blocked=${ka_block}us"
     pass=$((pass + 1))
 else
     echo "FAIL keep_all_backpressure (failures=$ka_fail, blocked_max=${ka_block}us < ${BLOCK_FLOOR_US}us - producer never noticed)"
